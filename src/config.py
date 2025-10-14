@@ -11,6 +11,21 @@ def _env_flag(name: str, default: bool = False) -> bool:
         return default
     return raw.strip().lower() in {"1", "true", "yes", "on"}
 
+def _env_int_list(name: str) -> list[int]:
+    raw = os.getenv(name)
+    if not raw:
+        return []
+    values = []
+    for part in raw.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        try:
+            values.append(int(part))
+        except ValueError:
+            print(f"[WARN] Ignoring invalid admin id '{part}' in {name}")
+    return values
+
 
 @dataclass
 class Settings:
@@ -26,6 +41,8 @@ class Settings:
     telegram_proxy_enabled: bool = _env_flag(
         "TELEGRAM_PROXY_ENABLED", default=os.getenv("TELEGRAM_PROXY_URL") is not None
     )
+    skip_db_init: bool = _env_flag("SKIP_DB_INIT", default=False)
+    admin_ids: tuple[int, ...] = tuple(_env_int_list("ADMIN_IDS"))
 
 
 settings = Settings()
