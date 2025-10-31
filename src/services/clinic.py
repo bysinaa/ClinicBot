@@ -2,12 +2,17 @@ from __future__ import annotations
 
 from typing import Optional
 
-from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.config import settings
 from src.models import ClinicProfile
 
 _profile_cache: ClinicProfile | None = None
+
+
+def invalidate_profile_cache() -> None:
+    global _profile_cache
+    _profile_cache = None
 
 
 def _set_cache(profile: ClinicProfile) -> ClinicProfile:
@@ -16,14 +21,41 @@ def _set_cache(profile: ClinicProfile) -> ClinicProfile:
     return profile
 
 
+def _ensure_manual_defaults(profile: ClinicProfile, *, created: bool = False) -> bool:
+    changed = created
+
+    def apply(attr: str, value):
+        nonlocal changed
+        if value is None:
+            return
+        if getattr(profile, attr) != value:
+            setattr(profile, attr, value)
+            changed = True
+
+    apply("phone_number", settings.clinic_phone_number)
+    apply("phone_label", settings.clinic_phone_label)
+    apply("address_text", settings.clinic_address_text)
+
+    lat = settings.clinic_location_lat
+    lon = settings.clinic_location_lon
+    if lat is not None and lon is not None:
+        if profile.location_lat != lat or profile.location_lon != lon:
+            profile.location_lat = lat
+            profile.location_lon = lon
+            changed = True
+    return changed
+
+
 async def get_profile(session: AsyncSession) -> ClinicProfile:
     profile = await session.get(ClinicProfile, 1)
-    if profile:
-        return _set_cache(profile)
-    profile = ClinicProfile(id=1)
-    session.add(profile)
-    await session.commit()
-    await session.refresh(profile)
+    created = False
+    if profile is None:
+        profile = ClinicProfile(id=1)
+        session.add(profile)
+        created = True
+    if _ensure_manual_defaults(profile, created=created):
+        await session.commit()
+        await session.refresh(profile)
     return _set_cache(profile)
 
 

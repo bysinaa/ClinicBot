@@ -1,4 +1,4 @@
-﻿from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date
 from persiantools.jdatetime import JalaliDate
 
 JALALI_MONTH_NAMES = [
@@ -17,13 +17,13 @@ JALALI_MONTH_NAMES = [
 ]
 
 JALALI_WEEKDAY_NAMES = [
+    "شنبه",
+    "یکشنبه",
     "دوشنبه",
     "سه‌شنبه",
     "چهارشنبه",
     "پنجشنبه",
     "جمعه",
-    "شنبه",
-    "یکشنبه",
 ]
 
 

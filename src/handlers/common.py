@@ -1,4 +1,5 @@
-﻿from aiogram import F, Router
+# -*- coding: utf-8 -*-
+from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
@@ -25,20 +26,20 @@ router = Router(name="common")
 BACK_BUTTON_TEXT = "⬅️ بازگشت"
 REG_CANCEL = "لغو"
 
-PATIENT_WELCOME = "سلام! برای استفاده از خدمات ابتدا ثبت‌نام را کامل کنید."
-PATIENT_MENU_TEXT = "یکی از گزینه‌های زیر را انتخاب کنید:"
-ADMIN_MENU_TEXT = "منوی مدیریت فعال است. یکی از گزینه‌ها را انتخاب کنید:"
-REG_NAME_PROMPT = "نام و نام‌خانوادگی خود را ارسال کنید."
-REG_NID_PROMPT = "کد ملی ۱۰ رقمی خود را وارد کنید."
-REG_PHONE_PROMPT = "شماره موبایل خود را وارد کنید (مثلاً 09123456789)."
+PATIENT_WELCOME = "سلام! برای استفاده از خدمات کلینیک ابتدا ثبت‌نام کنید یا از منوی زیر گزینه‌ای را انتخاب کنید."
+PATIENT_MENU_TEXT = "لطفاً یکی از گزینه‌های منوی بیماران را انتخاب کنید:"
+ADMIN_MENU_TEXT = "منوی مدیریت فعال است. لطفاً یکی از گزینه‌ها را انتخاب کنید:"
+REG_NAME_PROMPT = "نام و نام‌خانوادگی خود را وارد کنید."
+REG_NID_PROMPT = "کد ملی خود را وارد کنید."
+REG_PHONE_PROMPT = "شماره تلفن همراه خود را وارد کنید (مثلاً 09123456789)."
 REG_BIRTH_PROMPT = "سال تولد خود را انتخاب کنید:"  # Jalali
 REG_BIRTH_MONTH_PROMPT = "ماه تولد را انتخاب کنید:"
 REG_BIRTH_DAY_PROMPT = "روز تولد را انتخاب کنید:"
-REG_ALREADY_TEXT = "اطلاعات شما قبلاً ثبت شده است و می‌توانید از منو استفاده کنید."
-REG_CANCELLED = "فرآیند ثبت‌نام لغو شد."
-REG_SUCCESS = "ثبت‌نام با موفقیت انجام شد ✅"
-INVALID_NID = "کد ملی نامعتبر است."
-INVALID_PHONE = "شماره موبایل نامعتبر است."
+REG_ALREADY_TEXT = "حساب کاربری شما قبلاً ثبت شده است و می‌توانید از منو استفاده کنید."
+REG_CANCELLED = "فرایند ثبت‌نام لغو شد."
+REG_SUCCESS = "اطلاعات شما با موفقیت ثبت شد."
+INVALID_NID = "کد ملی وارد شده معتبر نیست."
+INVALID_PHONE = "شماره تلفن وارد شده معتبر نیست."
 
 PATIENT_CONTACT_PLACEHOLDER = "اطلاعات تماس بزودی توسط ادمین در دسترس قرار می‌گیرد."
 PATIENT_ADDRESS_PLACEHOLDER = "آدرس و موقعیت مطب بزودی از این بخش اعلام می‌شود."
@@ -149,7 +150,7 @@ def _patient_contact_text(profile) -> str:
     phone_number = getattr(profile, "phone_number", None)
     phone_label = getattr(profile, "phone_label", None)
     if phone_number:
-        label = phone_label or "شماره تماس"
+        label = phone_label or settings.clinic_phone_label
         lines.append(f"{label}: {phone_number}")
     else:
         lines.append("شماره تماس در سامانه ثبت نشده است.")
@@ -164,11 +165,6 @@ def _patient_address_text(profile) -> str:
     if address_text:
         return address_text
     return "آدرس مطب هنوز ثبت نشده است."
-
-async def _load_clinic_profile():
-    async with SessionLocal() as session:
-        return await get_profile(session)
-
 
 def _phone_is_valid(value: str) -> bool:
     return value.isdigit() and value.startswith("09") and len(value) == 11
@@ -436,80 +432,7 @@ async def reg_phone(m: Message, state: FSMContext):
     )
 
 
-@router.callback_query(F.data == "menu:home")
-async def menu_home(c: CallbackQuery, state: FSMContext, current_user: User | None = None):
-    await state.clear()
-    is_admin = _is_admin_user(current_user, c.from_user.id)
-    await _send_menu_message(
-        c.message,
-        ADMIN_MENU_TEXT if is_admin else PATIENT_MENU_TEXT,
-        _menu_keyboard(is_admin, current_user),
-    )
-    await c.answer()
-
-
-@router.callback_query(F.data == "menu:book")
-async def menu_book(c: CallbackQuery, state: FSMContext, current_user: User | None = None):
-    await c.answer()
-    await state.clear()
-    is_admin = _is_admin_user(current_user, c.from_user.id)
-    await _send_menu_message(
-        c.message,
-        "برای رزرو نوبت از منوی تاریخ استفاده کنید.",
-        _menu_keyboard(is_admin, current_user),
-    )
-
-
-@router.callback_query(F.data == "menu:contact")
-async def menu_contact(c: CallbackQuery, state: FSMContext, current_user: User | None = None):
-    await c.answer()
-    await state.clear()
-    is_admin = _is_admin_user(current_user, c.from_user.id)
-    profile = await _load_clinic_profile()
-    text = _patient_contact_text(profile)
-    await _send_menu_message(c.message, text, _menu_keyboard(is_admin, current_user))
-
-
-@router.callback_query(F.data == "menu:address")
-async def menu_address(c: CallbackQuery, state: FSMContext, current_user: User | None = None):
-    await c.answer()
-    await state.clear()
-    is_admin = _is_admin_user(current_user, c.from_user.id)
-    profile = await _load_clinic_profile()
-    text = _patient_address_text(profile)
-    await _send_menu_message(c.message, text, _menu_keyboard(is_admin, current_user))
-    if getattr(profile, "location_lat", None) is not None and getattr(profile, "location_lon", None) is not None:
-        await c.message.bot.send_location(
-            chat_id=c.message.chat.id,
-            latitude=profile.location_lat,
-            longitude=profile.location_lon,
-        )
-
-
-@router.callback_query(F.data == "menu:online")
-async def menu_online(c: CallbackQuery, state: FSMContext, current_user: User | None = None):
-    await c.answer()
-    await state.clear()
-    is_admin = _is_admin_user(current_user, c.from_user.id)
-    await _send_menu_message(c.message, PATIENT_ONLINE_PLACEHOLDER, _menu_keyboard(is_admin, current_user))
-
-
-@router.callback_query(F.data == "menu:receipt")
-async def menu_receipt(c: CallbackQuery, state: FSMContext, current_user: User | None = None):
-    await c.answer()
-    await state.clear()
-    is_admin = _is_admin_user(current_user, c.from_user.id)
-    await _send_menu_message(c.message, PATIENT_RECEIPT_TEXT, _menu_keyboard(is_admin, current_user))
-
-
-@router.callback_query(F.data == "menu:consult")
-async def menu_consult(c: CallbackQuery, state: FSMContext, current_user: User | None = None):
-    await c.answer()
-    await state.clear()
-    is_admin = _is_admin_user(current_user, c.from_user.id)
-    await _send_menu_message(c.message, PATIENT_CONSULT_TEXT, _menu_keyboard(is_admin, current_user))
-
-
 @router.message(F.text == "مشاوره هوشمند")
 async def smart_consult(m: Message):
     await m.answer(PATIENT_CONSULT_TEXT)
+

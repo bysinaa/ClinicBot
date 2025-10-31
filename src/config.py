@@ -27,6 +27,30 @@ def _env_int_list(name: str) -> list[int]:
     return values
 
 
+def _env_text(name: str, default: str | None = None) -> str | None:
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    value = raw.strip()
+    if not value:
+        return default
+    return value
+
+
+def _env_float(name: str) -> float | None:
+    raw = os.getenv(name)
+    if raw is None:
+        return None
+    value = raw.strip()
+    if not value:
+        return None
+    try:
+        return float(value)
+    except ValueError:
+        print(f"[WARN] Ignoring invalid float '{raw}' in {name}")
+        return None
+
+
 @dataclass
 class Settings:
     bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -43,6 +67,11 @@ class Settings:
     )
     skip_db_init: bool = _env_flag("SKIP_DB_INIT", default=False)
     admin_ids: tuple[int, ...] = tuple(_env_int_list("ADMIN_IDS"))
+    clinic_phone_number: str | None = _env_text("CLINIC_PHONE_NUMBER")
+    clinic_phone_label: str = _env_text("CLINIC_PHONE_LABEL", default="تماس با مطب") or "تماس با مطب"
+    clinic_address_text: str | None = _env_text("CLINIC_ADDRESS_TEXT")
+    clinic_location_lat: float | None = _env_float("CLINIC_LOCATION_LAT")
+    clinic_location_lon: float | None = _env_float("CLINIC_LOCATION_LON")
 
 
 settings = Settings()

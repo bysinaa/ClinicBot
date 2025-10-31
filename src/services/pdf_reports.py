@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 from __future__ import annotations
 
 import os
@@ -149,6 +150,81 @@ def generate_appointment_pdf(
 
     story.append(Spacer(1, 20))
     story.append(Paragraph(_rtl("تهیه و توسعه توسط ClinicBot"), footer_style))
+
+    doc.build(story)
+    return path
+
+
+
+def generate_day_summary_pdf(out_dir: str, jdate: str, rows: Sequence[dict[str, str]]) -> str:
+    os.makedirs(out_dir, exist_ok=True)
+    path = os.path.join(out_dir, f"day_{jdate}.pdf")
+
+    font_name = _ensure_font_registered()
+
+    doc = SimpleDocTemplate(
+        path,
+        pagesize=A4,
+        rightMargin=20 * mm,
+        leftMargin=20 * mm,
+        topMargin=20 * mm,
+        bottomMargin=20 * mm,
+    )
+
+    header_style = ParagraphStyle(
+        name="Header",
+        fontName=font_name,
+        fontSize=16,
+        leading=20,
+        alignment=TA_RIGHT,
+        spaceAfter=10,
+    )
+    body_style = ParagraphStyle(
+        name="Body",
+        fontName=font_name,
+        fontSize=12,
+        leading=18,
+        alignment=TA_RIGHT,
+        spaceAfter=8,
+    )
+
+    story = []
+    story.append(Paragraph(_rtl("گزارش نوبت‌های روز"), header_style))
+    story.append(Paragraph(_rtl(f"تاریخ: {jdate}"), body_style))
+    story.append(Spacer(1, 12))
+
+    table_data = [[
+        _rtl("وضعیت پرداخت"),
+        _rtl("شماره تماس"),
+        _rtl("سن"),
+        _rtl("نام و نام خانوادگی"),
+        _rtl("ردیف"),
+    ]]
+
+    for idx, row in enumerate(rows, start=1):
+        table_data.append([
+            _rtl(row.get("payment", "-")),
+            _rtl(row.get("phone", "-")),
+            _rtl(row.get("age", "-")),
+            _rtl(row.get("full_name", "-")),
+            _rtl(str(idx)),
+        ])
+
+    table = Table(table_data, colWidths=[35 * mm, 35 * mm, 20 * mm, 55 * mm, 20 * mm])
+    table.setStyle(
+        TableStyle(
+            [
+                ("BACKGROUND", (0, 0), (-1, 0), colors.whitesmoke),
+                ("ALIGN", (0, 0), (-1, -1), "RIGHT"),
+                ("FONTNAME", (0, 0), (-1, -1), font_name),
+                ("FONTSIZE", (0, 0), (-1, -1), 11),
+                ("GRID", (0, 0), (-1, -1), 0.3, colors.lightgrey),
+                ("BOTTOMPADDING", (0, 0), (-1, 0), 8),
+                ("TOPPADDING", (0, 0), (-1, 0), 8),
+            ]
+        )
+    )
+    story.append(table)
 
     doc.build(story)
     return path

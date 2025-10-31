@@ -17,6 +17,18 @@ class BookingStates(StatesGroup):
 class AdminStates(StatesGroup):
     waiting_secret = State()
 
+class AdminMessageStates(StatesGroup):
+    choosing_mode = State()
+    awaiting_target = State()
+    awaiting_message = State()
+    confirming = State()
+    reminder_selecting_date = State()
+    reminder_entering_template = State()
+
+class AdminPdfStates(StatesGroup):
+    selecting_month = State()
+    selecting_day = State()
+
 class AdminScheduleStates(StatesGroup):
     selecting_month = State()
     selecting_day = State()
@@ -24,12 +36,6 @@ class AdminScheduleStates(StatesGroup):
     awaiting_slot_start = State()
     awaiting_slot_end = State()
     awaiting_slot_capacity = State()
-
-class AdminContactStates(StatesGroup):
-    awaiting_phone_label = State()
-    awaiting_phone_number = State()
-    awaiting_address = State()
-    awaiting_location = State()
 
 class OnlineConsultStates(StatesGroup):
     waiting_question = State()

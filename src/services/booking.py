@@ -1,10 +1,14 @@
-﻿from dataclasses import dataclass
-from datetime import date, time
+# -*- coding: utf-8 -*-
+from dataclasses import dataclass
+
+from datetime import date, time, datetime, timedelta
 from typing import Sequence
 
 from persiantools.jdatetime import JalaliDate
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from src.models import (
     Appointment,
@@ -13,20 +17,7 @@ from src.models import (
     ScheduleSlot,
 )
 
-DEFAULT_TIME_SLOTS = [
-    "09:00",
-    "09:30",
-    "10:00",
-    "10:30",
-    "11:00",
-    "11:30",
-    "12:00",
-    "14:00",
-    "14:30",
-    "15:00",
-    "15:30",
-    "16:00",
-]
+DEFAULT_TIME_SLOTS = [f"{hour:02d}:00" for hour in range(8, 17)]
 
 
 async def get_available_slots(session: AsyncSession, jdate: str) -> list[str]:
@@ -68,6 +59,21 @@ class SlotSummary:
         return max(self.capacity - self.booked, 0)
 
 
+class SlotCreationError(Exception):
+    """Raised when a schedule slot cannot be created."""
+
+
+class SlotOverlapError(SlotCreationError):
+    """Raised when a new slot intersects with an existing one."""
+
+    def __init__(self, existing_start: time, existing_end: time) -> None:
+        self.existing_start = existing_start
+        self.existing_end = existing_end
+        super().__init__(
+            f"این بازه با بازهٔ {existing_start.strftime('%H:%M')} تا {existing_end.strftime('%H:%M')} تداخل دارد."
+        )
+
+
 async def list_schedule_days(
     session: AsyncSession,
     start: date,
@@ -91,12 +97,93 @@ async def create_schedule_day(session: AsyncSession, day_date: date) -> Schedule
         await session.execute(select(ScheduleDay).where(ScheduleDay.date == day_date))
     ).scalar_one_or_none()
     if existing:
+        await _ensure_default_slots(session, existing)
         return existing
     day = ScheduleDay(date=day_date, is_active=True)
     session.add(day)
     await session.commit()
     await session.refresh(day)
+    await _ensure_default_slots(session, day)
     return day
+
+
+async def _ensure_default_slots(session: AsyncSession, day: ScheduleDay) -> None:
+    existing_slots = (
+        await session.execute(
+            select(ScheduleSlot)
+            .where(ScheduleSlot.day_id == day.id)
+            .order_by(ScheduleSlot.start_time, ScheduleSlot.id)
+        )
+    ).scalars().all()
+    target_starts = [datetime.strptime(item, "%H:%M").time() for item in DEFAULT_TIME_SLOTS]
+    slot_duration = timedelta(hours=1)
+
+    if existing_slots:
+        updated = False
+        used_ids: set[int] = set()
+
+        slots_by_start: dict[time, list[ScheduleSlot]] = {}
+        for slot in existing_slots:
+            slots_by_start.setdefault(slot.start_time, []).append(slot)
+
+        for slot_list in slots_by_start.values():
+            slot_list.sort(key=lambda s: s.id)
+
+        for start_time in target_starts:
+            desired_end = (datetime.combine(date.today(), start_time) + slot_duration).time()
+            slot = None
+            slot_candidates = slots_by_start.get(start_time)
+            if slot_candidates:
+                slot = next((s for s in slot_candidates if s.id not in used_ids), None)
+            if slot is None:
+                slot = next((s for s in existing_slots if s.id not in used_ids), None)
+            if slot is None:
+                session.add(
+                    ScheduleSlot(
+                        day_id=day.id,
+                        start_time=start_time,
+                        end_time=desired_end,
+                        capacity=10,
+                        is_active=True,
+                    )
+                )
+                updated = True
+            else:
+                used_ids.add(slot.id)
+                if slot.start_time != start_time:
+                    slot.start_time = start_time
+                    updated = True
+                if slot.end_time != desired_end:
+                    slot.end_time = desired_end
+                    updated = True
+                if slot.capacity != 10:
+                    slot.capacity = 10
+                    updated = True
+                if not slot.is_active:
+                    slot.is_active = True
+                    updated = True
+
+        for slot in existing_slots:
+            if slot.id not in used_ids and slot.is_active:
+                slot.is_active = False
+                updated = True
+
+        if updated:
+            await session.commit()
+        return
+
+    for start_time in target_starts:
+        end_time = (datetime.combine(date.today(), start_time) + slot_duration).time()
+        session.add(
+            ScheduleSlot(
+                day_id=day.id,
+                start_time=start_time,
+                end_time=end_time,
+                capacity=10,
+                is_active=True,
+            )
+        )
+    await session.commit()
 
 
 async def delete_schedule_day(session: AsyncSession, day_id: int) -> bool:
@@ -220,7 +307,11 @@ async def get_day_slot_summaries(session: AsyncSession, day_id: int) -> Sequence
 
 
 async def get_slot_by_id(session: AsyncSession, slot_id: int) -> ScheduleSlot | None:
-    return await session.get(ScheduleSlot, slot_id)
+    return await session.get(
+        ScheduleSlot,
+        slot_id,
+        options=(selectinload(ScheduleSlot.day),),
+    )
 
 
 async def create_schedule_slot(
@@ -230,6 +321,24 @@ async def create_schedule_slot(
     end_time: time,
     capacity: int,
 ) -> ScheduleSlot:
+    if capacity <= 0:
+        raise SlotCreationError("ظرفیت بازه باید بزرگ‌تر از صفر باشد.")
+    if start_time >= end_time:
+        raise SlotCreationError("زمان پایان باید بعد از زمان شروع باشد.")
+    existing = (
+        await session.execute(
+            select(ScheduleSlot)
+            .where(
+                ScheduleSlot.day_id == day_id,
+                ScheduleSlot.is_active.is_(True),
+                ScheduleSlot.start_time < end_time,
+                ScheduleSlot.end_time > start_time,
+            )
+            .order_by(ScheduleSlot.start_time)
+        )
+    ).scalars().first()
+    if existing:
+        raise SlotOverlapError(existing.start_time, existing.end_time)
     slot = ScheduleSlot(
         day_id=day_id,
         start_time=start_time,
@@ -238,7 +347,11 @@ async def create_schedule_slot(
         is_active=True,
     )
     session.add(slot)
-    await session.commit()
+    try:
+        await session.commit()
+    except IntegrityError as exc:
+        await session.rollback()
+        raise SlotCreationError("ایجاد بازه به دلیل خطای پایگاه‌داده انجام نشد.") from exc
     await session.refresh(slot)
     return slot
 
@@ -284,3 +397,4 @@ async def count_slot_bookings(session: AsyncSession, slot_id: int) -> int:
         select(func.count(Appointment.id)).where(Appointment.slot_id == slot_id)
     )
     return int(result.scalar_one())
+

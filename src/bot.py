@@ -1,9 +1,16 @@
 import asyncio
+import sys
+from pathlib import Path
+
+if __package__ is None or __package__ == "":
+    sys.path.append(str(Path(__file__).resolve().parent.parent))
+
 from aiogram import Bot, Dispatcher
 from aiogram.enums import ParseMode
 from aiogram.client.default import DefaultBotProperties
 from aiogram.client.session.aiohttp import AiohttpSession
-from aiogram.exceptions import TelegramNetworkError
+from aiogram.exceptions import TelegramNetworkError, TelegramUnauthorizedError
+
 from src.config import settings
 from src.database import init_db
 from src.middlewares.auth import UserMiddleware
@@ -26,6 +33,12 @@ async def main():
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
         session=session,
     )
+    try:
+        await bot.get_me()
+    except TelegramUnauthorizedError as error:
+        print("[ERROR] Telegram rejected the provided bot token. Update TELEGRAM_BOT_TOKEN.")
+        await bot.session.close()
+        raise SystemExit(1) from error
     dp = Dispatcher()
     # Middlewares
     dp.message.middleware(UserMiddleware())
@@ -39,6 +52,8 @@ async def main():
         await dp.start_polling(bot)
     except TelegramNetworkError as error:
         print(f"[WARN] Polling stopped: {error}")
+    finally:
+        await bot.session.close()
 
 if __name__ == "__main__":
     try:
