@@ -17,14 +17,6 @@ class BookingStates(StatesGroup):
 class AdminStates(StatesGroup):
     waiting_secret = State()
 
-class AdminMessageStates(StatesGroup):
-    choosing_mode = State()
-    awaiting_target = State()
-    awaiting_message = State()
-    confirming = State()
-    reminder_selecting_date = State()
-    reminder_entering_template = State()
-
 class AdminPdfStates(StatesGroup):
     selecting_month = State()
     selecting_day = State()

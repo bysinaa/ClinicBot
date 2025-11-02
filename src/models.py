@@ -40,6 +40,10 @@ class User(Base):
     full_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     national_id: Mapped[str | None] = mapped_column(String(16), nullable=True, index=True)
     birth_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    gender: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    insurance: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    address: Mapped[str | None] = mapped_column(Text, nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     role: Mapped[Role] = mapped_column(Enum(Role), default=Role.patient, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 

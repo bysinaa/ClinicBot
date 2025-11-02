@@ -1,4 +1,4 @@
-import asyncpg
+﻿import asyncpg
 from asyncpg.exceptions import DuplicateDatabaseError, InvalidCatalogNameError
 from sqlalchemy import text
 from sqlalchemy.engine import make_url
@@ -42,6 +42,11 @@ async def _create_database() -> None:
 
 async def _ensure_optional_columns(conn) -> None:
     await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS birth_date DATE"))
+    await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS gender VARCHAR(16)"))
+    await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS insurance VARCHAR(128)"))
+    await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS address TEXT"))
+    await conn.execute(text("ALTER TABLE users ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE"))
+    await conn.execute(text("UPDATE users SET is_active = TRUE WHERE is_active IS NULL"))
     await conn.execute(text("ALTER TABLE appointments ADD COLUMN IF NOT EXISTS slot_id INTEGER"))
     await conn.execute(text("ALTER TABLE appointments ADD COLUMN IF NOT EXISTS payment_status paymentstatus DEFAULT 'unpaid'"))
     await conn.execute(text("UPDATE appointments SET payment_status = 'unpaid' WHERE payment_status IS NULL"))
@@ -53,3 +58,4 @@ async def _ensure_optional_columns(conn) -> None:
     await conn.execute(text("ALTER TABLE clinic_profile ALTER COLUMN updated_at SET DEFAULT NOW()"))
     await conn.execute(text("ALTER TABLE clinic_profile ALTER COLUMN updated_at SET NOT NULL"))
     await conn.execute(text("CREATE TABLE IF NOT EXISTS online_consult_requests (id SERIAL PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE, question TEXT NOT NULL, receipt_file_id VARCHAR(256), status onlineconsultrequeststatus DEFAULT 'pending' NOT NULL, admin_notes TEXT, answer TEXT, created_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW(), updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW())"))
+

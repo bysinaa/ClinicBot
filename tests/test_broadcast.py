@@ -1,117 +1,55 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-import logging
-import types
+import tempfile
 import unittest
-from datetime import time
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from pathlib import Path
+from types import SimpleNamespace
 
-from aiogram.exceptions import TelegramForbiddenError, TelegramRetryAfter
-
-from src.services.broadcast import (
-    BroadcastSummary,
-    broadcast_messages,
-    render_message_template,
-    send_message_with_retry,
-)
-
-logging.getLogger("src.services.broadcast").setLevel(logging.CRITICAL)
+from src.services import broadcast
 
 
-class RenderTemplateTests(unittest.TestCase):
-    def test_render_template_with_appointment(self) -> None:
-        user = types.SimpleNamespace(full_name="Ali Reza", phone="09121234567", id=1)
-        slot = types.SimpleNamespace(start_time=time(9, 0), end_time=time(9, 30))
-        appointment = types.SimpleNamespace(
-            id=42,
-            jdate="1403-01-10",
-            time_slot="09:00",
-            status=types.SimpleNamespace(value="confirmed"),
-            slot=slot,
-        )
-        template = "Hello {name}, phone {phone}, appt {appointment_id} on {date} at {time} [{status}]"
-        result = render_message_template(template, user, appointment)
-        expected = "Hello Ali Reza, phone 09121234567, appt 42 on 1403-01-10 at 09:00 - 09:30 [confirmed]"
-        self.assertEqual(result, expected)
+class BroadcastDbTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.tmpdir = tempfile.TemporaryDirectory()
+        self.db_path = Path(self.tmpdir.name) / "subscribers.db"
+        # Patch module-level path for the duration of each test
+        broadcast.DB_PATH = self.db_path
+        # Ensure module creates a fresh database file
+        broadcast._init_db()  # type: ignore[attr-defined]
 
-    def test_render_template_without_appointment(self) -> None:
-        user = types.SimpleNamespace(full_name=None, phone=None, id=7)
-        template = "Hi {name}! Contact: {phone}. Last status: {status}"
-        result = render_message_template(template, user, None)
-        self.assertEqual(result, "Hi Unknown! Contact: -. Last status: -")
+    def tearDown(self) -> None:
+        self.tmpdir.cleanup()
 
+    def test_add_user_is_idempotent(self) -> None:
+        broadcast.add_user(123)
+        broadcast.add_user(123)
+        broadcast.add_user(456)
+        users = broadcast.get_all_users()
+        self.assertCountEqual(users, [123, 456])
+        self.assertEqual(broadcast.users_count(), 2)
 
-class SendMessageWithRetryTests(unittest.IsolatedAsyncioTestCase):
-    async def test_retry_after_then_success(self) -> None:
-        class _FakeBot:
-            def __init__(self) -> None:
-                self.send_message = AsyncMock()
+    def test_register_user_from_message(self) -> None:
+        message = SimpleNamespace(chat=SimpleNamespace(id=999))
+        # Should add chat id to sqlite database
+        broadcast.add_user(111)
+        self.assertEqual(broadcast.users_count(), 1)
+        broadcast._init_db()  # ensure DB exists
+        # call async helper using event loop
+        import asyncio
 
-        bot = _FakeBot()
-        retry_exc = TelegramRetryAfter(
-            method=MagicMock(),
-            message="Flood control",
-            retry_after=0,
-        )
-        bot.send_message.side_effect = [retry_exc, None]
-        with patch("src.services.broadcast.asyncio.sleep", new=AsyncMock()) as sleep_mock:
-            ok, error = await send_message_with_retry(bot, chat_id=123, text="hello", max_retries=2)
-        self.assertTrue(ok)
-        self.assertIsNone(error)
-        self.assertEqual(bot.send_message.await_count, 2)
-        sleep_mock.assert_awaited()
-
-    async def test_forbidden_stops_immediately(self) -> None:
-        class _FakeBot:
-            def __init__(self) -> None:
-                self.send_message = AsyncMock()
-
-        bot = _FakeBot()
-        bot.send_message.side_effect = TelegramForbiddenError(
-            method=MagicMock(),
-            message="Blocked",
-        )
-        with patch("src.services.broadcast.asyncio.sleep", new=AsyncMock()) as sleep_mock:
-            ok, error = await send_message_with_retry(bot, chat_id=999, text="ping", max_retries=2)
-        self.assertFalse(ok)
-        self.assertIsNotNone(error)
-        bot.send_message.assert_awaited_once()
-        sleep_mock.assert_not_awaited()
+        asyncio.run(broadcast.register_user_from_message(message))
+        self.assertCountEqual(broadcast.get_all_users(), [111, 999])
 
 
-class BroadcastMessagesTests(unittest.IsolatedAsyncioTestCase):
-    async def test_broadcast_summary_counts(self) -> None:
-        bot = types.SimpleNamespace()
-
-        users = [
-            types.SimpleNamespace(id=1, tg_id=101, full_name="User1", phone="1"),
-            types.SimpleNamespace(id=2, tg_id=202, full_name="User2", phone="2"),
-        ]
-        appointments: dict[int, Any] = {user.id: None for user in users}
-
-        async def _fake_send_message(*args: Any, **kwargs: Any) -> tuple[bool, str | None]:
-            raise AssertionError("Should not be called")
-
-        bot.send_message = AsyncMock(side_effect=_fake_send_message)  # type: ignore[attr-defined]
-
-        with patch(
-            "src.services.broadcast.send_message_with_retry",
-            new=AsyncMock(side_effect=[(True, None), (False, "failed")]),
-        ):
-            summary = await broadcast_messages(
-                bot,
-                template="Ping {name}",
-                users=users,
-                appointments=appointments,
-                throttle_delay=0,
-            )
-        self.assertIsInstance(summary, BroadcastSummary)
-        self.assertEqual(summary.total, 2)
-        self.assertEqual(summary.success, 1)
-        self.assertEqual(summary.failed, 1)
-        self.assertEqual(summary.errors, [(2, "failed")])
+class BroadcastUtilitiesTests(unittest.TestCase):
+    def test_chunk_text_splits_long_messages(self) -> None:
+        text = "x" * 5000
+        parts = broadcast.chunk_text(text, limit=2048)
+        self.assertEqual(len(parts), 3)
+        self.assertEqual(parts[0], "x" * 2048)
+        self.assertEqual(parts[1], "x" * 2048)
+        self.assertEqual(parts[2], "x" * 904)
 
 
 if __name__ == "__main__":

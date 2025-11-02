@@ -6,6 +6,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Union
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
+from aiogram.filters import StateFilter
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from persiantools.jdatetime import JalaliDate
@@ -21,7 +22,7 @@ from src.keyboards import (
     booking_slots_keyboard,
     main_menu_inline,
 )
-from src.models import Appointment, AppointmentStatus, PaymentStatus, User, Role
+from src.models import Appointment, AppointmentStatus, PaymentStatus, Role, User
 from src.services.ai_consultation import consult_medical
 from src.services.booking import (
     SlotAvailability,
@@ -704,7 +705,7 @@ async def menu_consult(c: CallbackQuery, state: FSMContext):
     await c.answer()
 
 
-@router.message()
+@router.message(StateFilter(None))
 async def fallback_ai_consult(m: Message):
     if not settings.openai_api_key:
         return

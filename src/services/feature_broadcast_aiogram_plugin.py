@@ -1,4 +1,4 @@
-"""Legacy import path for the broadcast helpers."""
+"""Compatibility layer that re-exports the fixed broadcast plugin."""
 
 from .feature_broadcast_aiogram_plugin_fixed import (
     BroadcastStates,
