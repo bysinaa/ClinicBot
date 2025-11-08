@@ -33,36 +33,36 @@ def _assert_unicode(text: str) -> str:
 
 # Public constants so handlers can reuse the exact labels ---------------------
 
-REGISTER_TEXT = "ثبت\u200cنام"
-BOOK_APPOINTMENT_TEXT = "رزرو نوبت"
-CLINIC_CONTACT_TEXT = "تماس با کلینیک"
-CLINIC_ADDRESS_TEXT = "آدرس کلینیک"
-ONLINE_CONSULT_TEXT = "مشاوره\u200cی آنلاین"
-SEND_RECEIPT_TEXT = "ارسال رسید پرداخت"
-SMART_ASSIST_TEXT = "دستیار هوشمند"
-BACK_TO_MENU_TEXT = "بازگشت به منوی اصلی"
-CANCEL_TEXT = "❌ لغو"
+REGISTER_TEXT = "ثبت‌نام 👤"
+BOOK_APPOINTMENT_TEXT = "رزرو نوبت 🗓️"
+CLINIC_CONTACT_TEXT = "تماس با کلینیک ☎️"
+CLINIC_ADDRESS_TEXT = "آدرس و موقعیت 📍"
+ONLINE_CONSULT_TEXT = "مشاوره آنلاین 💬"
+SEND_RECEIPT_TEXT = "ارسال رسید پرداخت 📤"
+SMART_ASSIST_TEXT = "دستیار هوشمند 🤖"
+BACK_TO_MENU_TEXT = "بازگشت به منو ⬅️"
+CANCEL_TEXT = "انصراف ✖️"
 
-ADMIN_SCHEDULE_TEXT = "مدیریت برنامه\u200cی نوبت\u200cها"
-ADMIN_ONLINE_TEXT = "پیام\u200cهای مشاوره\u200cی آنلاین"
-ADMIN_PENDING_TEXT = "درخواست\u200cهای در انتظار"
-ADMIN_PDF_TEXT = "دریافت گزارش PDF"
-ADMIN_BROADCAST_TEXT = "پیام همگانی"
+ADMIN_SCHEDULE_TEXT = "مدیریت برنامه نوبت‌ها 🗂️"
+ADMIN_ONLINE_TEXT = "درخواست‌های مشاوره آنلاین 📥"
+ADMIN_PENDING_TEXT = "درخواست‌های در انتظار بررسی ⏳"
+ADMIN_PDF_TEXT = "گزارش‌های PDF 📄"
+ADMIN_BROADCAST_TEXT = "پیام همگانی 📢"
 
-ADD_DAY_TEXT = "➕ افزودن روز"
-ADD_SLOT_TEXT = "➕ افزودن بازه\u200cی زمانی"
-TOGGLE_SLOT_DISABLE_TEXT = "⛔️ غیرفعال کردن بازه"
-TOGGLE_SLOT_ENABLE_TEXT = "✅ فعال کردن بازه"
-DELETE_SLOT_TEXT = "🗑 حذف بازه"
-TOGGLE_DAY_DISABLE_TEXT = "⛔️ غیرفعال کردن روز"
-TOGGLE_DAY_ENABLE_TEXT = "✅ فعال کردن روز"
-EXPORT_DAY_PDF_TEXT = "📄 خروجی PDF روز"
-DELETE_DAY_TEXT = "🗑 حذف روز"
-BACK_TO_DAYS_TEXT = "↩️ بازگشت به فهرست روزها"
-BACK_TO_MONTHS_TEXT = "↩️ بازگشت به فهرست ماه\u200cها"
+ADD_DAY_TEXT = "افزودن روز جدید ➕"
+ADD_SLOT_TEXT = "افزودن بازه زمانی ➕"
+TOGGLE_SLOT_DISABLE_TEXT = "غیرفعال‌سازی بازه ⛔"
+TOGGLE_SLOT_ENABLE_TEXT = "فعال‌سازی بازه ✅"
+DELETE_SLOT_TEXT = "حذف بازه 🗑️"
+TOGGLE_DAY_DISABLE_TEXT = "غیرفعال‌سازی روز ⛔"
+TOGGLE_DAY_ENABLE_TEXT = "فعال‌سازی روز ✅"
+EXPORT_DAY_PDF_TEXT = "دریافت PDF روز 📄"
+DELETE_DAY_TEXT = "حذف روز 🗑️"
+BACK_TO_DAYS_TEXT = "بازگشت به فهرست روزها ⬅️"
+BACK_TO_MONTHS_TEXT = "بازگشت به فهرست ماه‌ها ⬅️"
 
-PREV_PAGE_TEXT = "⬅️ قبلی"
-NEXT_PAGE_TEXT = "➡️ بعدی"
+PREV_PAGE_TEXT = "صفحه قبل ◀️"
+NEXT_PAGE_TEXT = "صفحه بعد ▶️"
 
 
 # Main menu keyboards --------------------------------------------------------
@@ -256,9 +256,9 @@ def booking_slots_keyboard(slots: Sequence["SlotAvailability"], jdate: str) -> I
     for slot in slots:
         remaining = max(slot.capacity - slot.booked, 0)
         if remaining <= 0:
-            status_text = "تکمیل شده"
+            status_text = "تکمیل شده ⛔"
         else:
-            status_text = f"ظرفیت خالی: {remaining}"
+            status_text = f"ظرفیت باقی‌مانده: {remaining}"
         label = f"{slot.start_time} تا {slot.end_time} | {status_text}"
         buttons.append(
             [
@@ -331,7 +331,7 @@ def admin_schedule_slots_keyboard(
 ) -> InlineKeyboardMarkup:
     buttons: list[list[InlineKeyboardButton]] = []
     for slot in slots:
-        status_text = "فعال" if slot.is_active else "غیرفعال"
+        status_text = "فعال ✅" if slot.is_active else "غیرفعال ⛔"
         remaining = getattr(slot, "remaining", max(slot.capacity - slot.booked, 0))
         label = (
             f"{slot.start_time} تا {slot.end_time} | وضعیت: {status_text} | "

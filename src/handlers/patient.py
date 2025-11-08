@@ -72,8 +72,132 @@ BOOKING_RECEIPT_REMINDER = "برای تکمیل رزرو باید تصویر ر�
 BOOKING_RECEIPT_SAVED = "رسید پرداخت ثبت شد. پس از بررسی ادمین نتیجه اطلاع‌رسانی می‌شود."
 
 CONTACT_MISSING_PHONE = "شماره تماس ثبت نشده است. لطفاً با پشتیبانی مجموعه هماهنگ کنید."
-CONTACT_TEXT_TEMPLATE = "{label}: {phone}"
 ADDRESS_FALLBACK = "آدرس مطب هنوز ثبت نشده است."
+ADDRESS_SELECT_PROMPT = "برای دریافت موقعیت، یکی از شعبه‌ها را انتخاب کنید."
+ADDRESS_BRANCH_FALLBACK = "اطلاعات {label} هنوز ثبت نشده است."
+CONTACT_SECTION_TITLES = {
+    "tehran": "شعبه تهران (شهرک غرب)",
+    "karaj": "شعبه کرج (برج طاق کسری)",
+    "other": "سایر خطوط پشتیبانی",
+}
+
+
+def _normalize_dial_number(raw_number: str | None) -> str | None:
+    """Return a +<country><number> format suitable for Telegram contact cards."""
+    if not raw_number:
+        return None
+    stripped = raw_number.strip()
+    digits = "".join(ch for ch in stripped if ch.isdigit() or ch == "+")
+    if not digits:
+        return None
+    normalized = digits
+    if normalized.startswith("++"):
+        normalized = normalized[1:]
+    if normalized.startswith("+"):
+        body = "".join(ch for ch in normalized if ch.isdigit())
+        return f"+{body}"
+    digits_only = "".join(ch for ch in normalized if ch.isdigit())
+    if digits_only.startswith("0098"):
+        return f"+{digits_only[2:]}"
+    if digits_only.startswith("00"):
+        return f"+{digits_only[2:]}"
+    if digits_only.startswith("98"):
+        return f"+{digits_only}"
+    if digits_only.startswith("0"):
+        return f"+98{digits_only[1:]}"
+    return f"+{digits_only}"
+
+
+def _group_contact_numbers(pairs: Sequence[tuple[str, str]] | None) -> dict[str, list[tuple[str, str]]]:
+    buckets: dict[str, list[tuple[str, str]]] = {"tehran": [], "karaj": [], "other": []}
+    if not pairs:
+        return buckets
+    for label, phone in pairs:
+        clean_label = (label or "").strip()
+        clean_phone = (phone or "").strip()
+        if not clean_phone:
+            continue
+        normalized_label = (
+            clean_label.replace("ي", "ی")
+            .replace("ك", "ک")
+            .replace("ة", "ه")
+            .lower()
+        )
+        key = "other"
+        if "تهران" in normalized_label:
+            key = "tehran"
+        elif "کرج" in normalized_label:
+            key = "karaj"
+        buckets[key].append((clean_label or "شماره تماس", clean_phone))
+    return buckets
+
+
+def _build_contact_overview(pairs: Sequence[tuple[str, str]] | None) -> str:
+    intro = (settings.clinic_contact_text or "").strip()
+    lines: list[str] = [intro] if intro else []
+    sections = _group_contact_numbers(pairs)
+    for key in ("tehran", "karaj", "other"):
+        entries = sections[key]
+        if not entries:
+            continue
+        if lines:
+            lines.append("")
+        lines.append(f"{CONTACT_SECTION_TITLES[key]}:")
+        for label, phone in entries:
+            lines.append(f"• {label}: {phone}")
+    if not lines:
+        return CONTACT_MISSING_PHONE
+    return "\n".join(lines).strip()
+
+
+def _available_address_options() -> list[tuple[str, str]]:
+    options: list[tuple[str, str]] = []
+    if settings.clinic_address_tehran or (settings.clinic_tehran_lat is not None and settings.clinic_tehran_lon is not None):
+        options.append(("tehran", "مطب تهران"))
+    if settings.clinic_address_karaj or (settings.clinic_karaj_lat is not None and settings.clinic_karaj_lon is not None):
+        options.append(("karaj", "مطب کرج"))
+    return options
+
+
+def _address_city_info(city_key: str) -> dict[str, str | float | None] | None:
+    mapping = {
+        "tehran": {
+            "label": "مطب تهران",
+            "address": settings.clinic_address_tehran,
+            "lat": settings.clinic_tehran_lat,
+            "lon": settings.clinic_tehran_lon,
+        },
+        "karaj": {
+            "label": "مطب کرج",
+            "address": settings.clinic_address_karaj,
+            "lat": settings.clinic_karaj_lat,
+            "lon": settings.clinic_karaj_lon,
+        },
+    }
+    return mapping.get(city_key)
+
+
+def _address_keyboard(options: list[tuple[str, str]]) -> InlineKeyboardMarkup:
+    rows: list[list[InlineKeyboardButton]] = []
+    if options:
+        rows.append([InlineKeyboardButton(text=label, callback_data=f"address:city:{slug}") for slug, label in options])
+    rows.append(
+        [
+            InlineKeyboardButton(text="⬅️ بازگشت", callback_data="menu:home"),
+            InlineKeyboardButton(text="🏠 منوی اصلی", callback_data="menu:home"),
+        ]
+    )
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+async def _send_location_with_text(bot, chat_id: int, *, lat: float | None, lon: float | None, text: str | None) -> None:
+    if lat is None or lon is None:
+        if text:
+            await bot.send_message(chat_id=chat_id, text=text)
+        return
+    await bot.send_location(chat_id=chat_id, latitude=lat, longitude=lon)
+    if text:
+        await bot.send_message(chat_id=chat_id, text=text)
 
 ONLINE_CONSULT_PROMPT_NEW = "لطفاً سؤال خود را ارسال کنید تا درخواست مشاوره آنلاین ثبت شود."
 ONLINE_CONSULT_NEED_REGISTER = "برای استفاده از مشاوره آنلاین ابتدا باید ثبت‌نام کنید."
@@ -283,31 +407,110 @@ async def menu_home(c: CallbackQuery, state: FSMContext, current_user: Optional[
 async def menu_contact(c: CallbackQuery, state: FSMContext):
     async with SessionLocal() as session:
         profile = await get_profile(session)
-    keyboard_rows: List[List[InlineKeyboardButton]] = [[InlineKeyboardButton(text="⬅️ بازگشت", callback_data="menu:home")]]
-    if profile.phone_number:
-        label = profile.phone_label or "تماس با مطب"
-        keyboard_rows.insert(0, [InlineKeyboardButton(text=label, url=f"tel:{profile.phone_number}")])
-        text = CONTACT_TEXT_TEMPLATE.format(label=label, phone=profile.phone_number)
-    else:
-        text = CONTACT_MISSING_PHONE
+    contact_pairs: list[tuple[str, str]] = list(settings.clinic_contact_numbers)
+    if not contact_pairs and profile.phone_number:
+        contact_pairs = [(profile.phone_label or "شماره کلینیک", profile.phone_number)]
+    await state.update_data({"contact_numbers": contact_pairs})
+    text = _build_contact_overview(contact_pairs)
+    keyboard_rows: List[List[InlineKeyboardButton]] = []
+    for idx, (label, phone) in enumerate(contact_pairs):
+        button_text = f"{label} • {phone}"
+        keyboard_rows.append(
+            [
+                InlineKeyboardButton(
+                    text=button_text,
+                    callback_data=f"contact:call:{idx}",
+                )
+            ]
+        )
+    keyboard_rows.append(
+        [
+            InlineKeyboardButton(text="⬅️ بازگشت", callback_data="menu:home"),
+            InlineKeyboardButton(text="🏠 منوی اصلی", callback_data="menu:home"),
+        ]
+    )
     markup = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
     await _respond(c, text, keyboard=markup, edit=True)
     await c.answer()
+
+
+@router.callback_query(F.data.startswith("contact:call:"))
+async def menu_contact_call(c: CallbackQuery, state: FSMContext):
+    idx_token = c.data.split(":", 2)[-1]
+    try:
+        index = int(idx_token)
+    except ValueError:
+        await c.answer("درخواست نامعتبر است.", show_alert=True)
+        return
+    data = await state.get_data()
+    contact_pairs: list[tuple[str, str]] = data.get("contact_numbers") or list(settings.clinic_contact_numbers)
+    if not contact_pairs:
+        async with SessionLocal() as session:
+            profile = await get_profile(session)
+        if profile.phone_number:
+            contact_pairs = [(profile.phone_label or "شماره کلینیک", profile.phone_number)]
+    if index < 0 or index >= len(contact_pairs):
+        await c.answer("این شماره در دسترس نیست.", show_alert=True)
+        return
+    label, raw_number = contact_pairs[index]
+    number = _normalize_dial_number(raw_number)
+    if not number:
+        await c.answer("ارسال شماره ممکن نشد.", show_alert=True)
+        return
+    await c.message.answer_contact(phone_number=number, first_name=label)
+    await c.answer("شماره تماس ارسال شد.")
 
 
 @router.callback_query(F.data == "menu:address")
 async def menu_address(c: CallbackQuery, state: FSMContext):
     async with SessionLocal() as session:
         profile = await get_profile(session)
-    markup = InlineKeyboardMarkup(inline_keyboard=[[InlineKeyboardButton(text="⬅️ بازگشت", callback_data="menu:home")]])
-    text = profile.address_text or ADDRESS_FALLBACK
-    await _respond(c, text, keyboard=markup, edit=True)
-    if profile.location_lat is not None and profile.location_lon is not None:
-        await c.message.bot.send_location(
-            chat_id=c.message.chat.id,
-            latitude=profile.location_lat,
-            longitude=profile.location_lon,
+    options = _available_address_options()
+    if options:
+        body_parts = [profile.address_text] if profile.address_text else []
+        body_parts.append(ADDRESS_SELECT_PROMPT)
+        text = "\n\n".join(body_parts)
+        markup = _address_keyboard(options)
+        await _respond(c, text or ADDRESS_SELECT_PROMPT, keyboard=markup, edit=True)
+    else:
+        markup = InlineKeyboardMarkup(
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(text="⬅️ بازگشت", callback_data="menu:home"),
+                    InlineKeyboardButton(text="🏠 منوی اصلی", callback_data="menu:home"),
+                ]
+            ]
         )
+        text = profile.address_text or ADDRESS_FALLBACK
+        await _respond(c, text, keyboard=markup, edit=True)
+        await _send_location_with_text(
+            c.message.bot,
+            c.message.chat.id,
+            lat=profile.location_lat,
+            lon=profile.location_lon,
+            text=text,
+        )
+    await c.answer()
+
+
+@router.callback_query(F.data.startswith("address:city:"))
+async def menu_address_city(c: CallbackQuery, state: FSMContext):
+    city_key = c.data.split(":", 2)[-1]
+    options = _available_address_options()
+    info = _address_city_info(city_key)
+    if not info or city_key not in {slug for slug, _ in options}:
+        await c.answer("اطلاعات این شعبه موجود نیست.", show_alert=True)
+        return
+    text = info["address"] or ADDRESS_BRANCH_FALLBACK.format(label=info["label"])
+    markup = _address_keyboard(options)
+    await _respond(c, text, keyboard=markup, edit=True)
+    await _send_location_with_text(
+        c.message.bot,
+        c.message.chat.id,
+        lat=info["lat"],
+        lon=info["lon"],
+        text=f"{info['label']}\n{text}" if text else info["label"],
+    )
     await c.answer()
 
 

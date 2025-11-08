@@ -51,6 +51,35 @@ def _env_float(name: str) -> float | None:
         return None
 
 
+def _env_phone_pairs(name: str) -> list[tuple[str, str]]:
+    raw = os.getenv(name)
+    if not raw:
+        return []
+    pairs: list[tuple[str, str]] = []
+    for chunk in raw.split(";"):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if ":" in chunk:
+            label, number = chunk.split(":", 1)
+        else:
+            label, number = "تماس", chunk
+        label = label.strip()
+        number = number.strip()
+        if not number:
+            continue
+        pairs.append((label or "تماس", number))
+    return pairs
+
+
+DEFAULT_CONTACT_TEXT = (
+    "🌸 به صفحه رسمی دکتر مریم میرفتاحی خوش آمدید ✨\n\n"
+    "در این صفحه با جدیدترین مطالب علمی، نکات تخصصی مراقبتی و پاسخ به سوالات رایج همراه شما هستیم.\n"
+    "💬 در صورت داشتن هرگونه سؤال، می‌توانید همین‌جا پیام بگذارید تا راهنمایی شوید.\n\n"
+    "💙 امیدواریم حضور شما آغاز مسیری سالم‌تر، زیباتر و شاداب‌تر باشد."
+)
+
+
 @dataclass
 class Settings:
     bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -69,9 +98,19 @@ class Settings:
     admin_ids: tuple[int, ...] = tuple(_env_int_list("ADMIN_IDS"))
     clinic_phone_number: str | None = _env_text("CLINIC_PHONE_NUMBER")
     clinic_phone_label: str = _env_text("CLINIC_PHONE_LABEL", default="تماس با مطب") or "تماس با مطب"
+    clinic_contact_text: str = _env_text("CLINIC_CONTACT_TEXT", default=DEFAULT_CONTACT_TEXT) or DEFAULT_CONTACT_TEXT
+    clinic_contact_numbers: tuple[tuple[str, str], ...] = tuple(_env_phone_pairs("CLINIC_CONTACT_NUMBERS"))
     clinic_address_text: str | None = _env_text("CLINIC_ADDRESS_TEXT")
+    clinic_address_tehran: str | None = _env_text("CLINIC_ADDRESS_TEHRAN")
+    clinic_address_karaj: str | None = _env_text("CLINIC_ADDRESS_KARAJ")
     clinic_location_lat: float | None = _env_float("CLINIC_LOCATION_LAT")
     clinic_location_lon: float | None = _env_float("CLINIC_LOCATION_LON")
+    clinic_tehran_lat: float | None = _env_float("CLINIC_TEHRAN_LAT")
+    clinic_tehran_lon: float | None = _env_float("CLINIC_TEHRAN_LON")
+    clinic_karaj_lat: float | None = _env_float("CLINIC_KARAJ_LAT")
+    clinic_karaj_lon: float | None = _env_float("CLINIC_KARAJ_LON")
+    pdf_stamp_path: str | None = _env_text("PDF_STAMP_PATH")
+    pdf_font_path: str | None = _env_text("PDF_FONT_PATH")
 
 
 settings = Settings()
