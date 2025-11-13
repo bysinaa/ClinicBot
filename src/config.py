@@ -1,5 +1,6 @@
 import os
 from dataclasses import dataclass
+from urllib.parse import urlparse
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -51,6 +52,22 @@ def _env_float(name: str) -> float | None:
         return None
 
 
+def _env_proxy_url(name: str) -> str | None:
+    raw = os.getenv(name)
+    if not raw:
+        return None
+    value = raw.strip()
+    if not value:
+        return None
+    if "://" not in value:
+        value = f"socks5://{value}"
+    parsed = urlparse(value)
+    if not parsed.scheme or not parsed.hostname:
+        print(f"[WARN] Invalid proxy url provided in {name}: {raw}")
+        return None
+    return value
+
+
 def _env_phone_pairs(name: str) -> list[tuple[str, str]]:
     raw = os.getenv(name)
     if not raw:
@@ -90,7 +107,7 @@ class Settings:
     admin_secret: str = os.getenv("ADMIN_SECRET", "change_this_admin_secret")
     openai_api_key: str | None = os.getenv("OPENAI_API_KEY") or None
     redis_url: str | None = os.getenv("REDIS_URL") or None
-    telegram_proxy_url: str | None = os.getenv("TELEGRAM_PROXY_URL") or None
+    telegram_proxy_url: str | None = _env_proxy_url("TELEGRAM_PROXY_URL")
     telegram_proxy_enabled: bool = _env_flag(
         "TELEGRAM_PROXY_ENABLED", default=os.getenv("TELEGRAM_PROXY_URL") is not None
     )

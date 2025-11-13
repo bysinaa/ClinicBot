@@ -9,13 +9,15 @@ from typing import Sequence
 import arabic_reshaper
 from bidi.algorithm import get_display
 from reportlab.lib import colors
-from reportlab.lib.enums import TA_CENTER, TA_RIGHT
+from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_RIGHT
 from reportlab.lib.pagesizes import A4
 from reportlab.lib.styles import ParagraphStyle
 from reportlab.lib.units import mm
 from reportlab.pdfbase import pdfmetrics
 from reportlab.pdfbase.ttfonts import TTFont
 from reportlab.platypus import Image, Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
+
+from persiantools.jdatetime import JalaliDateTime
 
 from src.config import settings
 
@@ -31,11 +33,30 @@ _STATUS_LABELS = {
 }
 
 
+class _FadedImage(Image):
+    """Image flowable with controllable opacity (used for the clinic stamp)."""
+
+    def __init__(self, *args, opacity: float = 0.4, **kwargs):
+        self._opacity = max(0.0, min(opacity, 1.0))
+        super().__init__(*args, **kwargs)
+
+    def draw(self):
+        canv = self.canv
+        canv.saveState()
+        if hasattr(canv, "setFillAlpha"):
+            canv.setFillAlpha(self._opacity)
+        if hasattr(canv, "setStrokeAlpha"):
+            canv.setStrokeAlpha(self._opacity)
+        super().draw()
+        canv.restoreState()
+
+
 def _rtl(text: str) -> str:
     if not text:
         return ""
     reshaped = arabic_reshaper.reshape(text)
-    return get_display(reshaped)
+    shaped = get_display(reshaped)
+    return shaped.replace("\u0647\u200d", "\u0647").replace("\u200d", "")
 
 
 def _fa_digits(value: str | int | float | None) -> str:
@@ -46,6 +67,22 @@ def _fa_digits(value: str | int | float | None) -> str:
 
 def _rtl_fa(text: str | int | float | None) -> str:
     return _rtl(_fa_digits(text))
+
+
+def _current_jalali_timestamp() -> str:
+    j_now = JalaliDateTime.to_jalali(datetime.now())
+    time_str = j_now.strftime("%H:%M")
+    date_str = j_now.strftime("%Y-%m-%d")
+    return f"{_fa_digits(time_str)}     {_fa_digits(date_str)}"
+
+
+def _format_ltr_jdate(jdate: str) -> str:
+    try:
+        year, month, day = jdate.split("-", 2)
+    except ValueError:
+        return _fa_digits(jdate)
+    formatted = f"{_fa_digits(year)} / {_fa_digits(month)} / {_fa_digits(day)}"
+    return f"\u202A{formatted}\u202C"
 
 
 def _ensure_font_registered() -> str:
@@ -91,13 +128,13 @@ def _stamp_flowable(max_width_mm: float = 45.0):
             print(f"[WARN] Stamp image not found at {candidate}")
             _STAMP_WARNING_EMITTED = True
         return None
-    img = Image(str(candidate))
+    img = _FadedImage(str(candidate), opacity=0.45)
     max_width = max_width_mm * mm
     if img.drawWidth > max_width:
         scale = max_width / img.drawWidth
         img.drawWidth *= scale
         img.drawHeight *= scale
-    img.hAlign = "RIGHT"
+    img.hAlign = "LEFT"
     img.vAlign = "BOTTOM"
     return img
 
@@ -109,6 +146,8 @@ def generate_appointment_pdf(
     jdate: str,
     time_slot: str,
     status: str,
+    payment_label: str | None = None,
+    reference_code: str | None = None,
     appointments: Sequence[dict[str, str]] | None = None,
 ) -> str:
     os.makedirs(out_dir, exist_ok=True)
@@ -132,6 +171,7 @@ def generate_appointment_pdf(
         leading=24,
         alignment=TA_CENTER,
         spaceAfter=10,
+        textColor=colors.black,
     )
     body_style = ParagraphStyle(
         name="Body",
@@ -140,6 +180,7 @@ def generate_appointment_pdf(
         leading=18,
         alignment=TA_CENTER,
         spaceAfter=6,
+        textColor=colors.black,
     )
     section_style = ParagraphStyle(
         name="Section",
@@ -148,6 +189,7 @@ def generate_appointment_pdf(
         leading=20,
         spaceBefore=10,
         spaceAfter=8,
+        textColor=colors.black,
     )
     footer_style = ParagraphStyle(
         name="Footer",
@@ -157,6 +199,21 @@ def generate_appointment_pdf(
         alignment=TA_CENTER,
         textColor=colors.grey,
     )
+    headline_style = ParagraphStyle(
+        name="Headline",
+        fontName=font_name,
+        fontSize=22,
+        leading=28,
+        alignment=TA_LEFT,
+        textColor=colors.HexColor("#0d47a1"),
+        spaceAfter=12,
+    )
+    payment_style = ParagraphStyle(
+        name="Payment",
+        parent=body_style,
+        fontSize=body_style.fontSize + 1,
+        textColor=colors.HexColor("#2e7d32"),
+    )
 
     card_rows: list[list] = []
 
@@ -164,12 +221,16 @@ def generate_appointment_pdf(
         card_rows.append([Paragraph(_rtl_fa(text), style)])
 
     add_text_line("رسید نوبت", header_style)
+    headline_text = f"شماره نوبت: {_fa_digits(appt_id)}"
+    card_rows.append([Paragraph(_rtl(headline_text), headline_style)])
     add_text_line(f"نام بیمار: {patient_name}")
-    add_text_line(f"شماره نوبت: {_fa_digits(appt_id)}")
-    add_text_line(f"تاریخ: {_fa_digits(jdate)}")
+    add_text_line(f"تاریخ: {_format_ltr_jdate(jdate)}")
     add_text_line(f"ساعت: {_fa_digits(time_slot or '-')}")
-    add_text_line(f"وضعیت: {_status_label(status)}")
-    add_text_line(f"زمان صدور: {_fa_digits(datetime.now().strftime('%Y-%m-%d %H:%M'))}")
+    payment_text = payment_label or _status_label(status)
+    add_text_line(f"وضعیت پرداخت: ✅ {payment_text}", payment_style)
+    if reference_code:
+        add_text_line(f"کد مرجع: {reference_code}")
+    add_text_line(f"زمان صدور: {_current_jalali_timestamp()}")
 
     if appointments:
         card_rows.append([Spacer(1, 10)])
@@ -212,11 +273,11 @@ def generate_appointment_pdf(
         TableStyle(
             [
                 ("BOX", (0, 0), (-1, -1), 2.5, colors.black),
+                ("BACKGROUND", (0, 0), (-1, -1), colors.white),
                 ("LEFTPADDING", (0, 0), (-1, -1), 18),
                 ("RIGHTPADDING", (0, 0), (-1, -1), 18),
                 ("TOPPADDING", (0, 0), (-1, -1), 16),
                 ("BOTTOMPADDING", (0, 0), (-1, -1), 16),
-                ("BACKGROUND", (0, 0), (-1, -1), colors.whitesmoke),
                 ("ALIGN", (0, 0), (-1, -1), "CENTER"),
             ]
         )

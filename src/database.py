@@ -51,6 +51,8 @@ async def _ensure_optional_columns(conn) -> None:
     await conn.execute(text("ALTER TABLE appointments ADD COLUMN IF NOT EXISTS payment_status paymentstatus DEFAULT 'unpaid'"))
     await conn.execute(text("UPDATE appointments SET payment_status = 'unpaid' WHERE payment_status IS NULL"))
     await conn.execute(text("ALTER TABLE appointments ALTER COLUMN payment_status SET NOT NULL"))
+    await conn.execute(text("ALTER TABLE appointments ADD COLUMN IF NOT EXISTS reference_code VARCHAR(64)"))
+    await conn.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS idx_appointments_reference_code ON appointments(reference_code) WHERE reference_code IS NOT NULL"))
     await conn.execute(text("CREATE TABLE IF NOT EXISTS clinic_profile (id INTEGER PRIMARY KEY, phone_number VARCHAR(32), phone_label VARCHAR(64), address_text TEXT, location_lat DOUBLE PRECISION, location_lon DOUBLE PRECISION, updated_at TIMESTAMP WITHOUT TIME ZONE DEFAULT NOW())"))
     await conn.execute(text("INSERT INTO clinic_profile (id, updated_at) VALUES (1, NOW()) ON CONFLICT (id) DO NOTHING"))
     await conn.execute(text("ALTER TABLE clinic_profile ADD COLUMN IF NOT EXISTS updated_at TIMESTAMP WITHOUT TIME ZONE"))

@@ -60,6 +60,7 @@ class Appointment(Base):
     notes: Mapped[str | None] = mapped_column(Text, nullable=True)
     payment_status: Mapped[PaymentStatus] = mapped_column(Enum(PaymentStatus), default=PaymentStatus.unpaid, nullable=False)
     slot_id: Mapped[int | None] = mapped_column(ForeignKey("schedule_slots.id", ondelete="SET NULL"), nullable=True)
+    reference_code: Mapped[str | None] = mapped_column(String(64), unique=True, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
     user: Mapped[User] = relationship(back_populates="appointments")

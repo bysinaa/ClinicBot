@@ -51,6 +51,7 @@ ADMIN_BROADCAST_TEXT = "پیام همگانی 📢"
 
 ADD_DAY_TEXT = "افزودن روز جدید ➕"
 ADD_SLOT_TEXT = "افزودن بازه زمانی ➕"
+EDIT_SLOT_TEXT = "ویرایش بازه ✏️"
 TOGGLE_SLOT_DISABLE_TEXT = "غیرفعال‌سازی بازه ⛔"
 TOGGLE_SLOT_ENABLE_TEXT = "فعال‌سازی بازه ✅"
 DELETE_SLOT_TEXT = "حذف بازه 🗑️"
@@ -255,11 +256,9 @@ def booking_slots_keyboard(slots: Sequence["SlotAvailability"], jdate: str) -> I
     buttons: list[list[InlineKeyboardButton]] = []
     for slot in slots:
         remaining = max(slot.capacity - slot.booked, 0)
+        label = f"{slot.start_time} تا {slot.end_time}"
         if remaining <= 0:
-            status_text = "تکمیل شده ⛔"
-        else:
-            status_text = f"ظرفیت باقی‌مانده: {remaining}"
-        label = f"{slot.start_time} تا {slot.end_time} | {status_text}"
+            label += " ⛔"
         buttons.append(
             [
                 InlineKeyboardButton(
@@ -342,6 +341,14 @@ def admin_schedule_slots_keyboard(
                 InlineKeyboardButton(
                     text=_assert_unicode(label),
                     callback_data=f"admin:schedule:slot_info:{slot.slot_id}",
+                )
+            ]
+        )
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text=_assert_unicode(EDIT_SLOT_TEXT),
+                    callback_data=f"admin:schedule:slot_edit:{slot.slot_id}",
                 )
             ]
         )

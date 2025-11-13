@@ -20,6 +20,11 @@ from src.models import (
 DEFAULT_TIME_SLOTS = [f"{hour:02d}:00" for hour in range(8, 17)]
 
 
+def _append_system_note(notes: str | None, message: str) -> str:
+    entry = f"[سیستم] {message}"
+    return f"{notes}\n{entry}" if notes else entry
+
+
 async def get_available_slots(session: AsyncSession, jdate: str) -> list[str]:
     """Legacy helper kept for backward compatibility."""
     result = await session.execute(
@@ -186,13 +191,32 @@ async def _ensure_default_slots(session: AsyncSession, day: ScheduleDay) -> None
     await session.commit()
 
 
-async def delete_schedule_day(session: AsyncSession, day_id: int) -> bool:
+async def delete_schedule_day(session: AsyncSession, day_id: int, *, force: bool = False) -> tuple[bool, int]:
     day = await session.get(ScheduleDay, day_id)
     if not day:
-        return False
+        return False, 0
+    slot_ids_result = await session.execute(
+        select(ScheduleSlot.id).where(ScheduleSlot.day_id == day_id)
+    )
+    slot_ids = slot_ids_result.scalars().all()
+    canceled = 0
+    if slot_ids:
+        appointments_result = await session.execute(
+            select(Appointment).where(Appointment.slot_id.in_(slot_ids))
+        )
+        appointments = appointments_result.scalars().all()
+        if appointments and not force:
+            return False, len(appointments)
+        if appointments:
+            for appt in appointments:
+                appt.slot_id = None
+                if appt.status != AppointmentStatus.canceled:
+                    appt.status = AppointmentStatus.canceled
+                appt.notes = _append_system_note(appt.notes, "لغو به دلیل حذف روز توسط ادمین")
+                canceled += 1
     await session.delete(day)
     await session.commit()
-    return True
+    return True, canceled
 
 
 async def set_schedule_day_active(session: AsyncSession, day_id: int, active: bool) -> bool:
@@ -356,6 +380,43 @@ async def create_schedule_slot(
     return slot
 
 
+async def update_schedule_slot(
+    session: AsyncSession,
+    slot_id: int,
+    start_time: time,
+    end_time: time,
+    capacity: int,
+) -> ScheduleSlot:
+    if capacity <= 0:
+        raise SlotCreationError("ظرفیت بازه باید بیشتر از صفر باشد.")
+    if start_time >= end_time:
+        raise SlotCreationError("زمان پایان باید بعد از زمان شروع باشد.")
+    slot = await session.get(ScheduleSlot, slot_id)
+    if not slot:
+        raise SlotCreationError("بازه یافت نشد.")
+    existing = (
+        await session.execute(
+            select(ScheduleSlot)
+            .where(
+                ScheduleSlot.day_id == slot.day_id,
+                ScheduleSlot.id != slot_id,
+                ScheduleSlot.is_active.is_(True),
+                ScheduleSlot.start_time < end_time,
+                ScheduleSlot.end_time > start_time,
+            )
+            .order_by(ScheduleSlot.start_time)
+        )
+    ).scalars().first()
+    if existing:
+        raise SlotOverlapError(existing.start_time, existing.end_time)
+    slot.start_time = start_time
+    slot.end_time = end_time
+    slot.capacity = capacity
+    await session.commit()
+    await session.refresh(slot)
+    return slot
+
+
 async def set_schedule_slot_active(session: AsyncSession, slot_id: int, active: bool) -> bool:
     slot = await session.get(ScheduleSlot, slot_id)
     if not slot:
@@ -365,16 +426,25 @@ async def set_schedule_slot_active(session: AsyncSession, slot_id: int, active: 
     return True
 
 
-async def delete_schedule_slot(session: AsyncSession, slot_id: int) -> bool:
+async def delete_schedule_slot(session: AsyncSession, slot_id: int, *, force: bool = False) -> tuple[bool, int]:
     slot = await session.get(ScheduleSlot, slot_id)
     if not slot:
-        return False
+        return False, 0
     booked = await count_slot_bookings(session, slot_id)
+    if booked > 0 and not force:
+        return False, booked
+    canceled = 0
     if booked > 0:
-        return False
+        result = await session.execute(select(Appointment).where(Appointment.slot_id == slot_id))
+        for appt in result.scalars().all():
+            appt.slot_id = None
+            if appt.status != AppointmentStatus.canceled:
+                appt.status = AppointmentStatus.canceled
+            appt.notes = _append_system_note(appt.notes, "لغو به دلیل حذف بازه توسط ادمین")
+            canceled += 1
     await session.delete(slot)
     await session.commit()
-    return True
+    return True, canceled
 
 
 async def count_user_bookings_for_day(

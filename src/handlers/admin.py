@@ -56,6 +56,7 @@ from src.services.booking import (
     list_schedule_days,
     set_schedule_day_active,
     set_schedule_slot_active,
+    update_schedule_slot,
 )
 from src.services.clinic import get_profile_cached
 from src.services.online_consult import (
@@ -85,6 +86,7 @@ SLOT_TIME_INVALID = "زمان وارد‌شده معتبر نیست."
 SLOT_RANGE_INVALID = "زمان پایان باید بعد از زمان شروع باشد."
 SLOT_CAPACITY_INVALID = "ظرفیت باید بزرگ‌تر از صفر باشد."
 SLOT_CREATED = "بازهٔ زمانی با موفقیت ایجاد شد."
+SLOT_UPDATED = "بازهٔ زمانی با موفقیت ویرایش شد."
 SLOT_OVERLAP_EXISTS = "این بازه با بازهٔ {start} تا {end} تداخل دارد."
 SLOT_NO_END_AVAILABLE = "بعد از این زمان شروع، گزینه‌ای برای پایان وجود ندارد."
 SLOT_DRAFT_INCOMPLETE = "اطلاعات بازه ناقص است. لطفاً دوباره تلاش کنید."
@@ -115,13 +117,53 @@ _TIME_CHOICES: tuple[str, ...] = tuple(
 SCHEDULE_DAY_PICKER_EMPTY = "تمام روزهای بازه انتخابی از قبل در برنامه ثبت شده‌اند."
 
 BOOKING_RANGE_DAYS = 180
+PENDING_PAGE_SIZE = 5
+STATE_PENDING_ENTRIES = "pending_entries"
+STATE_PENDING_CONTEXT = "pending_context"
+STATE_PENDING_PAGE = "pending_page"
 
 PAYMENT_STATUS_LABELS = {
     PaymentStatus.unpaid: "در انتظار پرداخت",
     PaymentStatus.awaiting_confirmation: "در انتظار بررسی",
-    PaymentStatus.settled: "پرداخت تایید شده",
+    PaymentStatus.settled: "پرداخت شده",
     PaymentStatus.rejected: "پرداخت رد شده",
 }
+
+REFERENCE_CODE_PREFIX = "CB"
+
+
+def _normalize_reference_jdate(jdate: str | None) -> str:
+    if jdate:
+        return jdate
+    today = JalaliDate.today()
+    return f"{today.year:04}-{today.month:02}-{today.day:02}"
+
+
+async def _build_reference_code(session, appt: Appointment) -> str:
+    target_jdate = _normalize_reference_jdate(appt.jdate)
+    stmt = (
+        select(func.count(Appointment.id))
+        .where(
+            Appointment.jdate == target_jdate,
+            Appointment.reference_code.is_not(None),
+        )
+    )
+    existing = await session.execute(stmt)
+    serial = int(existing.scalar_one() or 0)
+    date_token = target_jdate.replace("-", "")
+    return f"{REFERENCE_CODE_PREFIX}-{date_token}-{serial:03d}"
+
+
+async def _ensure_reference_code(session, appt: Appointment) -> None:
+    if appt.reference_code:
+        return
+    appt.reference_code = await _build_reference_code(session, appt)
+
+
+def _reference_notice(appt: Appointment | None) -> str:
+    if appt and appt.reference_code:
+        return f"\nکد مرجع: {appt.reference_code}"
+    return ""
 
 PDF_MONTH_PROMPT = "ماه مورد نظر برای گزارش PDF را انتخاب کنید."
 PDF_DAY_PROMPT = "روز مورد نظر برای تهیه گزارش را انتخاب کنید."
@@ -142,38 +184,203 @@ def _broadcast_debug(message: str) -> None:
 router = Router(name="admin")
 
 
-async def _show_pending_list(target, edit: bool) -> None:
-    text = "لیست نوبت‌های در انتظار در حال آماده‌سازی است."
-    if isinstance(target, Message):
-        await target.answer(text)
-        return
-    message = getattr(target, "message", None)
-    if message is None:
-        return
-    try:
-        if edit:
-            await message.edit_text(text)
-        else:
-            await message.answer(text)
-    except Exception:
-        await message.answer(text)
+async def _fetch_pending_entries() -> tuple[str, list[dict[str, object]]]:
+    async with SessionLocal() as session:
+        today_jdate = JalaliDate.today().strftime("%Y-%m-%d")
+        base_query = (
+            select(Appointment)
+            .options(
+                selectinload(Appointment.user),
+                selectinload(Appointment.slot),
+            )
+            .where(Appointment.receipt_file_id.is_not(None))
+            .order_by(Appointment.created_at.desc())
+        )
+        today_result = await session.execute(
+            base_query.where(Appointment.jdate == today_jdate).limit(40)
+        )
+        appointments = today_result.scalars().all()
+        context_label = "امروز"
+        if not appointments:
+            fallback_result = await session.execute(base_query.limit(40))
+            appointments = fallback_result.scalars().all()
+            context_label = "اخیر"
+    entries: list[dict[str, object]] = []
+    for appt in appointments:
+        user_name = appt.user.full_name if appt.user and appt.user.full_name else "-"
+        entries.append(
+            {
+                "id": appt.id,
+                "jdate": appt.jdate,
+                "time_label": _format_appointment_time(appt),
+                "patient": user_name,
+                "payment": _payment_status_label(appt.payment_status),
+            }
+        )
+    return context_label, entries
 
 
-async def _show_pending_detail(target, appt_id: int, edit: bool) -> None:
-    text = f"جزئیات نوبت {appt_id} در حال آماده‌سازی است."
-    if isinstance(target, Message):
-        await target.answer(text)
+async def _show_pending_list(
+    target: MessageLike,
+    state: FSMContext,
+    *,
+    edit: bool,
+    page: int | None = None,
+    force_refresh: bool = False,
+) -> None:
+    message, default_edit = _resolve_message(target)
+    data = await state.get_data()
+    entries: list[dict[str, object]] = data.get(STATE_PENDING_ENTRIES) or []
+    context_label: str = data.get(STATE_PENDING_CONTEXT) or ""
+    if force_refresh or not entries:
+        context_label, entries = await _fetch_pending_entries()
+        await state.update_data(
+            {
+                STATE_PENDING_ENTRIES: entries,
+                STATE_PENDING_CONTEXT: context_label,
+            }
+        )
+    total = len(entries)
+    total_pages = max(1, (total + PENDING_PAGE_SIZE - 1) // PENDING_PAGE_SIZE)
+    if page is None:
+        page = int(data.get(STATE_PENDING_PAGE, 0) or 0)
+    page = max(0, min(page, total_pages - 1))
+    await state.update_data({STATE_PENDING_PAGE: page})
+    start = page * PENDING_PAGE_SIZE
+    chunk = entries[start : start + PENDING_PAGE_SIZE]
+
+    keyboard_rows: list[list[InlineKeyboardButton]] = []
+    lines: list[str] = []
+    if not chunk:
+        content = ADMIN_PENDING_EMPTY
+    else:
+        lines.append(f"رسیدهای {context_label} (صفحه {page + 1} از {total_pages})")
+        lines.append("")
+        for entry in chunk:
+            lines.append(
+                f"#{entry['id']} | {entry['jdate']} | {entry['time_label']} | {entry['patient']} | پرداخت: {entry['payment']}"
+            )
+            keyboard_rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"مشاهده نوبت #{entry['id']}",
+                        callback_data=f"admin:pending:view:{entry['id']}",
+                    )
+                ]
+            )
+        content = "\n".join(lines)
+
+    if total_pages > 1:
+        nav_buttons: list[InlineKeyboardButton] = []
+        if page > 0:
+            nav_buttons.append(
+                InlineKeyboardButton(text="⬅️ قبلی", callback_data=f"admin:pending:page:{page - 1}")
+            )
+        if page < total_pages - 1:
+            nav_buttons.append(
+                InlineKeyboardButton(text="بعدی ➡️", callback_data=f"admin:pending:page:{page + 1}")
+            )
+        if nav_buttons:
+            keyboard_rows.append(nav_buttons)
+    keyboard_rows.append([InlineKeyboardButton(text="🔄 بروزرسانی", callback_data="admin:pending:refresh")])
+    keyboard_rows.append([InlineKeyboardButton(text="⬅️ بازگشت", callback_data="menu:home")])
+    keyboard = InlineKeyboardMarkup(inline_keyboard=keyboard_rows)
+
+    do_edit = default_edit if edit is None else edit
+    if do_edit:
+        try:
+            await message.edit_text(content, reply_markup=keyboard)
+        except TelegramBadRequest:
+            await message.answer(content, reply_markup=keyboard)
+    else:
+        await message.answer(content, reply_markup=keyboard)
+
+
+async def _show_pending_detail(target: MessageLike, state: FSMContext, appt_id: int, edit: bool) -> None:
+    message, default_edit = _resolve_message(target)
+    async with SessionLocal() as session:
+        appt = await session.get(
+            Appointment,
+            appt_id,
+            options=(
+                selectinload(Appointment.user),
+                selectinload(Appointment.slot),
+            ),
+        )
+    if not appt:
+        await message.answer("نوبت مورد نظر یافت نشد.")
+        await _show_pending_list(message, state, edit=False, force_refresh=True)
         return
-    message = getattr(target, "message", None)
-    if message is None:
-        return
-    try:
-        if edit:
-            await message.edit_text(text)
-        else:
-            await message.answer(text)
-    except Exception:
-        await message.answer(text)
+    user = appt.user
+    patient_name = user.full_name if user and user.full_name else "-"
+    patient_phone = user.phone if user and user.phone else "-"
+    time_label = _format_appointment_time(appt)
+    status_label = {
+        AppointmentStatus.pending: "در انتظار",
+        AppointmentStatus.confirmed: "تأیید شده",
+        AppointmentStatus.canceled: "لغو شده",
+    }.get(appt.status, getattr(appt.status, "value", str(appt.status)))
+    payment_label = _payment_status_label(appt.payment_status)
+    lines = [
+        f"جزئیات نوبت #{appt.id}",
+        f"بیمار: {patient_name}",
+        f"شماره تماس: {patient_phone}",
+        f"تاریخ: {appt.jdate}",
+        f"بازه زمانی: {time_label}",
+        f"وضعیت نوبت: {status_label}",
+        f"وضعیت پرداخت: {payment_label}",
+    ]
+    if appt.reference_code:
+        lines.append(f"کد پیگیری: {appt.reference_code}")
+    if appt.notes:
+        lines.append(f"یادداشت: {appt.notes}")
+    if appt.created_at:
+        lines.append(f"زمان ثبت: {appt.created_at:%Y-%m-%d %H:%M}")
+    detail_text = "\n".join(line for line in lines if line)
+
+    buttons: list[list[InlineKeyboardButton]] = []
+    if appt.payment_status != PaymentStatus.settled:
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text="✅ تأیید پرداخت",
+                    callback_data=f"admin:pending:confirm:{appt.id}",
+                )
+            ]
+        )
+    if appt.payment_status != PaymentStatus.rejected:
+        buttons.append(
+            [
+                InlineKeyboardButton(
+                    text="⛔ رد پرداخت",
+                    callback_data=f"admin:pending:cancel:{appt.id}",
+                )
+            ]
+        )
+    buttons.append(
+        [
+            InlineKeyboardButton(text="📄 دریافت PDF", callback_data=f"admin:pending:pdf:{appt.id}"),
+            InlineKeyboardButton(text="⬅️ بازگشت به لیست", callback_data="admin:pending:refresh"),
+        ]
+    )
+    keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+    if edit and default_edit:
+        try:
+            await message.edit_text(detail_text, reply_markup=keyboard)
+        except TelegramBadRequest:
+            await message.answer(detail_text, reply_markup=keyboard)
+    else:
+        await message.answer(detail_text, reply_markup=keyboard)
+
+    if appt.receipt_file_id:
+        try:
+            await message.answer_photo(
+                appt.receipt_file_id,
+                caption=f"رسید پرداخت نوبت #{appt.id}",
+            )
+        except TelegramBadRequest:
+            await message.answer("نمایش تصویر رسید امکان‌پذیر نبود.")
 
 
 def _is_admin_user(telegram_id: int, current_user: Optional[User]) -> bool:
@@ -217,6 +424,13 @@ def _normalize_phone_input(value: str) -> str | None:
     if len(cleaned) == 11 and cleaned.isdigit() and cleaned.startswith("0"):
         return cleaned
     return None
+
+
+def _extract_id_from_callback(data: str) -> int | None:
+    try:
+        return int(data.rsplit(":", 1)[-1])
+    except (ValueError, AttributeError):
+        return None
 
 
 async def _find_user_by_identifier(session, identifier: str) -> User | None:
@@ -329,8 +543,14 @@ async def _update_prompt_message(
 async def _refresh_schedule_month_map(state: FSMContext) -> Dict[str, Dict[str, List[Dict[str, str]]]]:
     async with SessionLocal() as session:
         today = date.today()
+        lookback = today - timedelta(days=BOOKING_RANGE_DAYS)
         end = today + timedelta(days=BOOKING_RANGE_DAYS)
-        days = await list_schedule_days(session, today, end)
+        days = await list_schedule_days(session, lookback, end)
+        if not days:
+            result = await session.execute(
+                select(ScheduleDay).order_by(ScheduleDay.date.asc())
+            )
+            days = result.scalars().all()
         month_map: Dict[str, Dict[str, object]] = {}
         for day in days:
             jalali = gregorian_to_jalali(day.date)
@@ -380,7 +600,7 @@ async def _refresh_pdf_month_map(state: FSMContext) -> Dict[str, Dict[str, List[
             except ValueError:
                 try:
                     gregorian = datetime.strptime(jdate, "%Y-%m-%d").date()
-                    jalali = JalaliDate.fromgregorian(date=gregorian)
+                    jalali = JalaliDate.to_jalali(gregorian)
                 except Exception:
                     jalali = None
             if jalali:
@@ -816,7 +1036,7 @@ async def admin_schedule_menu(c: CallbackQuery, state: FSMContext, current_user:
 
 @router.callback_query(AdminScheduleStates.selecting_month, F.data.startswith("admin:schedule:month:"))
 async def admin_schedule_choose_month(c: CallbackQuery, state: FSMContext):
-    month_key = c.data.split(":", 2)[2]
+    month_key = c.data.rsplit(":", 1)[-1]
     await _show_schedule_days(c, state, month_key)
 
 
@@ -828,7 +1048,7 @@ async def admin_schedule_back_months(c: CallbackQuery, state: FSMContext):
 
 @router.callback_query(AdminScheduleStates.selecting_day, F.data.startswith("admin:schedule:day:"))
 async def admin_schedule_choose_day(c: CallbackQuery, state: FSMContext):
-    jdate = c.data.split(":", 2)[2]
+    jdate = c.data.rsplit(":", 1)[-1]
     data = await state.get_data()
     month_key = data.get(STATE_SELECTED_MONTH)
     month_map = data.get(STATE_MONTH_MAP, {})
@@ -926,7 +1146,7 @@ async def admin_schedule_add_day_input(m: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("admin:schedule:toggle_day:"))
 async def admin_schedule_toggle_day(c: CallbackQuery, state: FSMContext):
-    day_id = int(c.data.split(":", 2)[2])
+    day_id = int(c.data.rsplit(":", 1)[-1])
     async with SessionLocal() as session:
         day = await session.get(ScheduleDay, day_id)
         if not day:
@@ -943,28 +1163,26 @@ async def admin_schedule_toggle_day(c: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("admin:schedule:delete_day:"))
 async def admin_schedule_delete_day(c: CallbackQuery, state: FSMContext):
-    day_id = int(c.data.split(":", 2)[2])
+    day_id = int(c.data.rsplit(":", 1)[-1])
     async with SessionLocal() as session:
-        summaries = await get_day_slot_summaries(session, day_id)
-        has_bookings = False
-        for slot in summaries:
-            if await count_slot_bookings(session, slot.slot_id) > 0:
-                has_bookings = True
-                break
-        if has_bookings:
-            await c.answer(SCHEDULE_DAY_DELETE_BLOCKED, show_alert=True)
+        success, affected = await delete_schedule_day(session, day_id)
+        if not success and affected > 0:
+            success, affected = await delete_schedule_day(session, day_id, force=True)
+            if not success:
+                await c.answer("حذف انجام نشد.", show_alert=True)
+                return
+            await c.answer(f"روز حذف شد و {affected} نوبت لغو گردید.", show_alert=True)
+        elif not success:
+            await c.answer("حذف انجام نشد.", show_alert=True)
             return
-        success = await delete_schedule_day(session, day_id)
-    if not success:
-        await c.answer("حذف انجام نشد.", show_alert=True)
-        return
-    await c.answer(SCHEDULE_DAY_DELETED)
+        else:
+            await c.answer(SCHEDULE_DAY_DELETED)
     await _show_schedule_months(c.message, state, edit=True)
 
 
 @router.callback_query(F.data.startswith("admin:schedule:add_slot:"))
 async def admin_schedule_add_slot_prompt(c: CallbackQuery, state: FSMContext):
-    day_id = int(c.data.split(":", 2)[2])
+    day_id = int(c.data.rsplit(":", 1)[-1])
     await state.update_data({STATE_SLOT_DRAFT: {"day_id": day_id}})
     await state.set_state(AdminScheduleStates.awaiting_slot_start)
     keyboard = admin_schedule_slot_start_keyboard(_start_time_choices())
@@ -972,6 +1190,33 @@ async def admin_schedule_add_slot_prompt(c: CallbackQuery, state: FSMContext):
         await c.message.edit_text(SLOT_START_PROMPT, reply_markup=keyboard)
     except TelegramBadRequest:
         await c.message.answer(SLOT_START_PROMPT, reply_markup=keyboard)
+    await c.answer()
+
+
+@router.callback_query(F.data.startswith("admin:schedule:slot_edit:"))
+async def admin_schedule_slot_edit(c: CallbackQuery, state: FSMContext):
+    slot_id = int(c.data.rsplit(":", 1)[-1])
+    async with SessionLocal() as session:
+        slot = await get_slot_by_id(session, slot_id)
+    if not slot:
+        await c.answer("بازه یافت نشد.", show_alert=True)
+        return
+    draft = {
+        "day_id": slot.day_id,
+        "slot_id": slot.id,
+        "mode": "edit",
+    }
+    await state.update_data({STATE_SLOT_DRAFT: draft})
+    await state.set_state(AdminScheduleStates.awaiting_slot_start)
+    keyboard = admin_schedule_slot_start_keyboard(_start_time_choices())
+    info_text = (
+        f"{SLOT_START_PROMPT}\n"
+        f"بازه فعلی: {slot.start_time.strftime('%H:%M')} - {slot.end_time.strftime('%H:%M')} | ظرفیت: {slot.capacity}"
+    )
+    try:
+        await c.message.edit_text(info_text, reply_markup=keyboard)
+    except TelegramBadRequest:
+        await c.message.answer(info_text, reply_markup=keyboard)
     await c.answer()
 
 
@@ -1064,6 +1309,7 @@ async def admin_schedule_slot_capacity(c: CallbackQuery, state: FSMContext):
     day_id = draft.get("day_id")
     start_str = draft.get("start")
     end_str = draft.get("end")
+    slot_id = draft.get("slot_id")
     if not all([day_id, start_str, end_str]):
         await c.answer(SLOT_DRAFT_INCOMPLETE, show_alert=True)
         return
@@ -1074,7 +1320,12 @@ async def admin_schedule_slot_capacity(c: CallbackQuery, state: FSMContext):
         return
     async with SessionLocal() as session:
         try:
-            await create_schedule_slot(session, int(day_id), start_time, end_time, capacity)
+            if slot_id:
+                await update_schedule_slot(session, int(slot_id), start_time, end_time, capacity)
+                result_text = SLOT_UPDATED
+            else:
+                await create_schedule_slot(session, int(day_id), start_time, end_time, capacity)
+                result_text = SLOT_CREATED
         except SlotOverlapError as error:
             await c.answer(
                 SLOT_OVERLAP_EXISTS.format(
@@ -1089,7 +1340,7 @@ async def admin_schedule_slot_capacity(c: CallbackQuery, state: FSMContext):
             return
     await state.update_data({STATE_SLOT_DRAFT: {}})
     jdate = data.get(STATE_SELECTED_DAY_JDATE)
-    await c.answer(SLOT_CREATED)
+    await c.answer(result_text)
     if jdate and day_id:
         await _show_schedule_day_detail(c.message, state, int(day_id), jdate, edit=True)
     else:
@@ -1152,7 +1403,7 @@ async def admin_schedule_slot_text_input(m: Message, state: FSMContext):
 
 @router.callback_query(F.data.startswith("admin:schedule:slot_toggle:"))
 async def admin_schedule_slot_toggle(c: CallbackQuery, state: FSMContext):
-    slot_id = int(c.data.split(":", 2)[2])
+    slot_id = int(c.data.rsplit(":", 1)[-1])
     async with SessionLocal() as session:
         slot = await get_slot_by_id(session, slot_id)
         if not slot:
@@ -1170,17 +1421,20 @@ async def admin_schedule_slot_toggle(c: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("admin:schedule:slot_delete:"))
 async def admin_schedule_slot_delete(c: CallbackQuery, state: FSMContext):
-    slot_id = int(c.data.split(":", 2)[2])
+    slot_id = int(c.data.rsplit(":", 1)[-1])
     async with SessionLocal() as session:
-        booked = await count_slot_bookings(session, slot_id)
-        if booked > 0:
-            await c.answer(SLOT_DELETE_BLOCKED, show_alert=True)
+        success, affected = await delete_schedule_slot(session, slot_id)
+        if not success and affected > 0:
+            success, affected = await delete_schedule_slot(session, slot_id, force=True)
+            if not success:
+                await c.answer("حذف بازه انجام نشد.", show_alert=True)
+                return
+            await c.answer(f"بازه حذف شد و {affected} نوبت لغو گردید.", show_alert=True)
+        elif not success:
+            await c.answer("حذف بازه انجام نشد.", show_alert=True)
             return
-        success = await delete_schedule_slot(session, slot_id)
-    if not success:
-        await c.answer("حذف بازه انجام نشد.", show_alert=True)
-        return
-    await c.answer(SLOT_DELETE_SUCCESS)
+        else:
+            await c.answer(SLOT_DELETE_SUCCESS)
     data = await state.get_data()
     day_id = data.get(STATE_SELECTED_DAY_ID)
     jdate = data.get(STATE_SELECTED_DAY_JDATE)
@@ -1190,7 +1444,7 @@ async def admin_schedule_slot_delete(c: CallbackQuery, state: FSMContext):
 
 @router.callback_query(F.data.startswith("admin:schedule:slot_info:"))
 async def admin_schedule_slot_info(c: CallbackQuery):
-    slot_id = c.data.split(":", 2)[2]
+    slot_id = c.data.rsplit(":", 1)[-1]
     await c.answer(f"شناسه بازه: {slot_id}")
 
 
@@ -1247,6 +1501,7 @@ async def admin_payment_review(c: CallbackQuery, state: FSMContext, current_user
             appointment.status = AppointmentStatus.confirmed
             decision_text = "پرداخت تایید شد ✅"
             patient_text = f"پرداخت نوبت #{appointment.id} تایید شد. منتظر حضور شما هستیم."
+            await _ensure_reference_code(session, appointment)
         elif action == "reject":
             if current_status == PaymentStatus.rejected:
                 await c.answer("این پرداخت قبلاً رد شده است.", show_alert=True)
@@ -1261,6 +1516,7 @@ async def admin_payment_review(c: CallbackQuery, state: FSMContext, current_user
         await session.refresh(appointment)
         user = appointment.user
         slot = appointment.slot
+    patient_text += _reference_notice(appointment)
     caption = c.message.caption or ""
     if caption:
         caption += "\n\n"
@@ -1269,6 +1525,8 @@ async def admin_payment_review(c: CallbackQuery, state: FSMContext, current_user
         time_label = f"{slot.start_time.strftime('%H:%M')} - {slot.end_time.strftime('%H:%M')}"
     caption += f"نتیجه بررسی: {decision_text}"
     caption += f"\nبازه زمانی: {time_label}"
+    if appointment.reference_code:
+        caption += f"\nکد مرجع: {appointment.reference_code}"
     try:
         await c.message.edit_caption(caption, reply_markup=None)
     except TelegramBadRequest:
@@ -1278,6 +1536,7 @@ async def admin_payment_review(c: CallbackQuery, state: FSMContext, current_user
         try:
             await c.bot.send_message(chat_id=user.tg_id, text=patient_text)
             if action == "approve":
+                payment_label = _payment_status_label(appointment.payment_status)
                 pdf_path = generate_appointment_pdf(
                     "reports",
                     appointment.id,
@@ -1285,11 +1544,13 @@ async def admin_payment_review(c: CallbackQuery, state: FSMContext, current_user
                     appointment.jdate,
                     time_label,
                     appointment.status.value,
+                    payment_label=payment_label,
+                    reference_code=appointment.reference_code,
                 )
                 await c.bot.send_document(
                     chat_id=user.tg_id,
                     document=FSInputFile(pdf_path),
-                    caption=f"رسید نوبت #{appointment.id}",
+                    caption=f"رسید نوبت #{appointment.id}{_reference_notice(appointment)}",
                 )
         except Exception:
             pass
@@ -1299,28 +1560,39 @@ async def pending_from_menu(c: CallbackQuery, state: FSMContext, current_user: O
         await c.answer("اجازه دسترسی ندارید.", show_alert=True)
         return
     await state.clear()
-    await _show_pending_list(c, edit=True)
+    await _show_pending_list(c, state, edit=True, force_refresh=True)
     await c.answer()
 
 
 @router.callback_query(F.data == "admin:pending:refresh")
-async def pending_refresh(c: CallbackQuery):
-    await _show_pending_list(c, edit=True)
+async def pending_refresh(c: CallbackQuery, state: FSMContext):
+    await _show_pending_list(c, state, edit=True, force_refresh=True)
     await c.answer()
 
 
 @router.message(StateFilter(None), F.text == ADMIN_PENDING_TEXT)
-async def pending_list(m: Message):
-    await _show_pending_list(m, edit=False)
+async def pending_list(m: Message, state: FSMContext):
+    await _show_pending_list(m, state, edit=False, force_refresh=True)
 
 
 @router.callback_query(F.data.startswith("admin:pending:view:"))
-async def pending_view(c: CallbackQuery):
+async def pending_view(c: CallbackQuery, state: FSMContext):
     appt_id = _extract_id_from_callback(c.data)
     if appt_id is None:
         await c.answer("شناسه نوبت نامعتبر است.", show_alert=True)
         return
-    await _show_pending_detail(c, appt_id, edit=True)
+    await _show_pending_detail(c, state, appt_id, edit=True)
+    await c.answer()
+
+
+@router.callback_query(F.data.startswith("admin:pending:page:"))
+async def pending_change_page(c: CallbackQuery, state: FSMContext):
+    try:
+        page = int(c.data.rsplit(":", 1)[-1])
+    except (ValueError, AttributeError):
+        await c.answer()
+        return
+    await _show_pending_list(c, state, edit=True, page=page)
     await c.answer()
 
 
@@ -1337,14 +1609,15 @@ async def pending_confirm(c: CallbackQuery):
     )
     if not appt:
         await c.answer("نوبت پیدا نشد.", show_alert=True)
-        await _show_pending_list(c, edit=True)
+        await _show_pending_list(c, state, edit=True, force_refresh=True)
         return
-    await c.answer("نوبت تایید شد ✅", show_alert=True)
-    await _show_pending_detail(c, appt_id, edit=True)
+    await c.answer("نوبت تایید شد ✅" + _reference_notice(appt), show_alert=True)
+    await _show_pending_detail(c, state, appt_id, edit=True)
+    await _send_receipt_to_user(c.bot, appt_id)
 
 
 @router.callback_query(F.data.startswith("admin:pending:cancel:"))
-async def pending_cancel(c: CallbackQuery):
+async def pending_cancel(c: CallbackQuery, state: FSMContext):
     appt_id = _extract_id_from_callback(c.data)
     if appt_id is None:
         await c.answer("شناسه نوبت نامعتبر است.", show_alert=True)
@@ -1356,10 +1629,10 @@ async def pending_cancel(c: CallbackQuery):
     )
     if not appt:
         await c.answer("نوبت پیدا نشد.", show_alert=True)
-        await _show_pending_list(c, edit=True)
+        await _show_pending_list(c, state, edit=True, force_refresh=True)
         return
     await c.answer("نوبت لغو شد.", show_alert=True)
-    await _show_pending_detail(c, appt_id, edit=True)
+    await _show_pending_detail(c, state, appt_id, edit=True)
 
 
 @router.callback_query(F.data.startswith("admin:pending:pdf:"))
@@ -1375,6 +1648,7 @@ async def pending_pdf(c: CallbackQuery):
             return
         user = await session.get(User, appt.user_id)
         appointments = await _fetch_user_appointments_summary(session, user.id)
+    payment_label = _payment_status_label(appt.payment_status)
     path = generate_appointment_pdf(
         "./reports",
         appt.id,
@@ -1382,11 +1656,13 @@ async def pending_pdf(c: CallbackQuery):
         appt.jdate,
         appt.time_slot,
         appt.status.value,
+        payment_label=payment_label,
+        reference_code=appt.reference_code,
         appointments=appointments,
     )
     await c.message.answer_document(
         FSInputFile(path),
-        caption=f"گزارش PDF نوبت #{appt_id}",
+        caption=f"گزارش PDF نوبت #{appt_id}{_reference_notice(appt)}",
     )
     await c.answer("فایل PDF ارسال شد.")
 
@@ -1454,7 +1730,8 @@ async def admin_confirm(m: Message, regexp):
     if not appt:
         await m.answer("شناسه نوبت نامعتبر است.")
         return
-    await m.answer(f"نوبت #{appt_id} تأیید شد ✅")
+    await m.answer(f"نوبت #{appt_id} تأیید شد ✅{_reference_notice(appt)}")
+    await _send_receipt_to_user(m.bot, appt_id)
 
 
 @router.message(StateFilter(None), F.text.regexp(r"^/cancel_(\d+)$"))
@@ -1481,6 +1758,7 @@ async def pdf_report(m: Message, regexp):
             return
         user = await session.get(User, appt.user_id)
         appointments = await _fetch_user_appointments_summary(session, user.id)
+    payment_label = _payment_status_label(appt.payment_status)
     path = generate_appointment_pdf(
         "./reports",
         appt.id,
@@ -1488,18 +1766,63 @@ async def pdf_report(m: Message, regexp):
         appt.jdate,
         appt.time_slot,
         appt.status.value,
+        payment_label=payment_label,
+        reference_code=appt.reference_code,
         appointments=appointments,
     )
-    await m.answer_document(FSInputFile(path), caption=f"گزارش نوبت #{appt_id}")
+    await m.answer_document(
+        FSInputFile(path),
+        caption=f"گزارش نوبت #{appt_id}{_reference_notice(appt)}",
+    )
+
+
+async def _send_receipt_to_user(bot, appt_id: int) -> None:
+    try:
+        async with SessionLocal() as session:
+            appt = await session.get(
+                Appointment,
+                appt_id,
+                options=(
+                    selectinload(Appointment.user),
+                    selectinload(Appointment.slot),
+                ),
+            )
+            if not appt or not appt.user or not appt.user.tg_id:
+                return
+            time_label = appt.time_slot or "-"
+            if appt.slot:
+                time_label = f"{appt.slot.start_time.strftime('%H:%M')} - {appt.slot.end_time.strftime('%H:%M')}"
+            payment_label = _payment_status_label(appt.payment_status)
+            path = generate_appointment_pdf(
+                "./reports",
+                appt.id,
+                appt.user.full_name or "-",
+                appt.jdate,
+                time_label,
+                appt.status.value,
+                payment_label=payment_label,
+                reference_code=appt.reference_code,
+            )
+    except Exception as exc:
+        print(f"[WARN] Unable to build receipt PDF: {exc}")
+        return
+    caption = f"رسید نوبت #{appt_id}{_reference_notice(appt)}"
+    try:
+        await bot.send_document(
+            chat_id=appt.user.tg_id,
+            document=FSInputFile(path),
+            caption=caption,
+        )
+    except Exception as exc:
+        print(f"[WARN] Failed to send receipt to user: {exc}")
 
 
 def _calculate_age(birth: date | None) -> str:
     if not birth:
         return "-"
-    today = date.today()
-    years = today.year - birth.year - (
-        (today.month, today.day) < (birth.month, birth.day)
-    )
+    today_j = JalaliDate.today()
+    birth_j = JalaliDate.fromgregorian(date=birth)
+    years = max(today_j.year - birth_j.year, 0)
     return str(years)
 
 
@@ -1552,6 +1875,25 @@ async def _fetch_user_appointments_summary(session, user_id: int) -> List[Dict[s
             }
         )
     return summary
+
+
+async def _update_appointment_status(
+    appt_id: int,
+    *,
+    status: AppointmentStatus,
+    payment_status: PaymentStatus,
+) -> Appointment | None:
+    async with SessionLocal() as session:
+        appt = await session.get(Appointment, appt_id)
+        if not appt:
+            return None
+        appt.status = status
+        appt.payment_status = payment_status
+        if payment_status == PaymentStatus.settled:
+            await _ensure_reference_code(session, appt)
+        await session.commit()
+        await session.refresh(appt)
+        return appt
 
 
 MessageLike = Union[Message, CallbackQuery]
