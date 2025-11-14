@@ -1821,8 +1821,10 @@ def _calculate_age(birth: date | None) -> str:
     if not birth:
         return "-"
     today_j = JalaliDate.today()
-    birth_j = JalaliDate.fromgregorian(date=birth)
-    years = max(today_j.year - birth_j.year, 0)
+    birth_j = JalaliDate.to_jalali(birth)
+    years = today_j.year - birth_j.year - (
+        (today_j.month, today_j.day) < (birth_j.month, birth_j.day)
+    )
     return str(years)
 
 
